@@ -1,0 +1,10 @@
+/samples
+prompt.md
+database.db
+uploads/*
+!uploads/.gitkeep
+__pycache__/
+*.pyc
+.env
+/uploads
+/test

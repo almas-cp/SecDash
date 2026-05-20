@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Security Research Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <div id="toast-root" class="toast-root"></div>
+
+    <main id="login-view" class="login-view">
+      <form id="login-form" class="login-card">
+        <div>
+          <p class="eyebrow">SecDash</p>
+          <h1>Security Research Dashboard</h1>
+        </div>
+        <label>
+          Username
+          <input id="login-username" name="username" autocomplete="username" required />
+        </label>
+        <label>
+          Password
+          <input id="login-password" name="password" type="password" autocomplete="current-password" required />
+        </label>
+        <button class="primary-button" type="submit">Sign in</button>
+        <p id="login-error" class="form-error" hidden></p>
+      </form>
+    </main>
+
+    <div id="app-shell" class="app-shell" hidden>
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark">SD</span>
+          <span>SecDash</span>
+        </div>
+        <div class="user-strip">
+          <span id="current-user"></span>
+          <span id="role-badge" class="role-badge"></span>
+          <button id="logout-button" class="ghost-button" type="button">Logout</button>
+        </div>
+      </header>
+
+      <div class="layout">
+        <aside class="sidebar">
+          <p class="sidebar-label">Pages</p>
+          <button class="nav-button" data-view="dashboard">Dashboard</button>
+          <button class="nav-button" data-view="workspaces">Workspaces</button>
+          <button class="nav-button" data-view="reports">Reports</button>
+          <button class="nav-button" data-view="admin">Admin</button>
+        </aside>
+
+        <section class="content">
+          <section id="dashboard-view" class="view">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">Overview</p>
+                <h2>Dashboard</h2>
+              </div>
+            </div>
+            <div id="dashboard-panels" class="metric-grid"></div>
+          </section>
+
+          <section id="workspaces-view" class="view" hidden>
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">Researcher</p>
+                <h2>Workspaces</h2>
+              </div>
+              <button id="new-workspace-button" class="primary-button" type="button">New Workspace</button>
+            </div>
+            <div id="workspace-grid" class="workspace-grid"></div>
+          </section>
+
+          <section id="workspace-detail-view" class="view" hidden>
+            <div class="section-heading">
+              <div>
+                <button id="back-to-workspaces" class="link-button" type="button">Back to workspaces</button>
+                <h2 id="workspace-title"></h2>
+              </div>
+              <div class="button-row">
+                <button id="parse-button" class="primary-button" type="button">Bulk Parse</button>
+                <button id="save-report-button" class="secondary-button" type="button" disabled>Save Report</button>
+              </div>
+            </div>
+
+            <div id="workspace-meta" class="meta-grid"></div>
+
+            <div class="panel">
+              <div class="panel-header">
+                <h3>Scan Files</h3>
+                <span class="muted">.xml, .nmap, .gnmap, .txt up to 10MB</span>
+              </div>
+              <label id="drop-zone" class="drop-zone">
+                <input id="file-input" type="file" multiple accept=".xml,.nmap,.gnmap,.txt" hidden />
+                <span>Drop nmap files here or click to browse</span>
+              </label>
+              <div id="file-list" class="file-list"></div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-header">
+                <h3>Parse Progress</h3>
+                <span id="parse-status" class="muted">Idle</span>
+              </div>
+              <div class="progress-shell">
+                <div id="progress-bar" class="progress-bar"></div>
+              </div>
+              <div id="live-log" class="live-log"></div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-header">
+                <h3>Saved Versions</h3>
+              </div>
+              <div id="workspace-report-list" class="compact-list"></div>
+            </div>
+          </section>
+
+          <section id="reports-view" class="view" hidden>
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">Researcher + Viewer</p>
+                <h2>Reports</h2>
+              </div>
+            </div>
+            <form id="report-filters" class="filter-bar">
+              <input id="filter-ip" placeholder="Filter by IP" />
+              <select id="filter-os">
+                <option value="">All OS</option>
+                <option value="ubuntu">Ubuntu</option>
+                <option value="rhel">RHEL</option>
+              </select>
+              <input id="filter-date" type="date" />
+              <select id="sort-field">
+                <option value="saved_at">Saved Date</option>
+                <option value="scan_date">Scan Date</option>
+                <option value="cve_count">CVE Count</option>
+              </select>
+              <select id="sort-order">
+                <option value="desc">Desc</option>
+                <option value="asc">Asc</option>
+              </select>
+              <button class="secondary-button" type="submit">Apply</button>
+            </form>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Workspace</th>
+                    <th>IP</th>
+                    <th>OS</th>
+                    <th>Scan Date</th>
+                    <th>Version</th>
+                    <th>Saved</th>
+                    <th>CVEs</th>
+                  </tr>
+                </thead>
+                <tbody id="report-table-body"></tbody>
+              </table>
+            </div>
+            <div class="pagination-row">
+              <button id="prev-page" class="ghost-button" type="button">Previous</button>
+              <span id="page-status" class="muted"></span>
+              <button id="next-page" class="ghost-button" type="button">Next</button>
+            </div>
+          </section>
+
+          <section id="admin-view" class="view" hidden>
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">Admin</p>
+                <h2>User Management</h2>
+              </div>
+            </div>
+            <form id="create-user-form" class="inline-form">
+              <input id="new-username" placeholder="Username" required />
+              <input id="new-password" type="password" placeholder="Password" required />
+              <select id="new-role">
+                <option value="researcher">Researcher</option>
+                <option value="viewer">Viewer</option>
+              </select>
+              <button class="primary-button" type="submit">Create User</button>
+            </form>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Username</th>
+                    <th>Role</th>
+                    <th>Created</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="user-table-body"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+      </div>
+    </div>
+
+    <div id="modal-root" class="modal-root" hidden></div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
