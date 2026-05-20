@@ -85,7 +85,7 @@
                 <h2 id="workspace-title"></h2>
               </div>
               <div class="button-row">
-                <button id="parse-button" class="primary-button" type="button">Bulk Parse</button>
+                <button id="parse-button" class="primary-button" type="button">Classify</button>
                 <button id="save-report-button" class="secondary-button" type="button" disabled>Save Report</button>
               </div>
             </div>
@@ -106,7 +106,15 @@
 
             <div class="panel">
               <div class="panel-header">
-                <h3>Parse Progress</h3>
+                <h3>Detected CVEs</h3>
+                <span id="cve-list-status" class="muted">Upload files to extract CVEs</span>
+              </div>
+              <div id="detected-cve-list" class="detected-cve-list"></div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-header">
+                <h3>Classification Progress</h3>
                 <span id="parse-status" class="muted">Idle</span>
               </div>
               <div class="progress-shell">

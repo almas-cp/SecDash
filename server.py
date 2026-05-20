@@ -42,6 +42,7 @@ SECRET_KEY = os.environ.get("SECDASH_SECRET_KEY", "sec-dash-dev-secret-change-me
 SESSION_COOKIE = "session_token"
 ALLOWED_UPLOAD_SUFFIXES = {".xml", ".nmap", ".gnmap", ".txt"}
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+CVE_REQUEST_DELAY_SECONDS = float(os.environ.get("CVE_REQUEST_DELAY_SECONDS", "5"))
 GROQ_API_URL = os.environ.get("GROQ_API_URL", "https://api.groq.com/openai/v1/chat/completions")
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 GROQ_TIMEOUT_SECONDS = int(os.environ.get("GROQ_TIMEOUT_SECONDS", "30"))
@@ -267,6 +268,62 @@ def parse_nmap_file(filepath: str) -> list[str]:
         content = handle.read()
     cves = re.findall(r"CVE-\d{4}-\d{4,7}", content, re.IGNORECASE)
     return sorted({cve.upper() for cve in cves})
+
+
+async def collect_file_cves(workspace_id: int, files: list[dict[str, Any]]) -> dict[str, Any]:
+    source_map: dict[str, list[str]] = {}
+    file_results: list[dict[str, Any]] = []
+
+    for item in files:
+        absolute = UPLOAD_DIR / item["filepath"]
+        if not absolute.exists():
+            logger.warning(
+                "Uploaded scan file missing during local CVE extraction | workspace_id=%s file_id=%s filename=%s filepath=%s",
+                workspace_id,
+                item["id"],
+                item["filename"],
+                item["filepath"],
+            )
+            file_results.append(
+                {
+                    "id": item["id"],
+                    "filename": item["filename"],
+                    "status": "missing",
+                    "cve_count": 0,
+                    "cves": [],
+                }
+            )
+            continue
+
+        parsed = await asyncio.to_thread(parse_nmap_file, str(absolute))
+        logger.info(
+            "Uploaded scan file locally extracted | workspace_id=%s file_id=%s filename=%s cve_count=%s",
+            workspace_id,
+            item["id"],
+            item["filename"],
+            len(parsed),
+        )
+        for cve_id in parsed:
+            source_map.setdefault(cve_id, []).append(item["filename"])
+        file_results.append(
+            {
+                "id": item["id"],
+                "filename": item["filename"],
+                "status": "ok",
+                "cve_count": len(parsed),
+                "cves": parsed,
+            }
+        )
+
+    items = [
+        {
+            "cve_id": cve_id,
+            "files": sorted(set(filenames)),
+            "file_count": len(set(filenames)),
+        }
+        for cve_id, filenames in sorted(source_map.items())
+    ]
+    return {"items": items, "files": file_results, "total": len(items)}
 
 
 def clean_text(value: Any) -> str | None:
@@ -766,14 +823,39 @@ async def classify_cve_attention(
     workspace: dict[str, Any],
     cve: dict[str, Any],
 ) -> dict[str, Any]:
+    workspace = dict(workspace)
     evidence = build_status_evidence(cve, workspace)
     fallback = fallback_attention_classification(cve, evidence)
     api_key = os.environ.get("GROQ_API_KEY")
+    logger.info(
+        "CVE status evidence built | cve=%s target=%s/%s api_status=%s status_summary=%s target_status_summary=%s fallback_attention=%s fallback_category=%s",
+        cve.get("cve_id"),
+        workspace.get("os"),
+        workspace.get("os_version"),
+        cve.get("api_status"),
+        json.dumps(evidence.get("status_summary") or {}, sort_keys=True),
+        json.dumps(evidence.get("target_status_summary") or {}, sort_keys=True),
+        fallback["attention_needed"],
+        fallback["status_category"],
+    )
     if not api_key:
+        logger.info(
+            "Groq CVE classifier skipped | cve=%s reason=GROQ_API_KEY not set fallback_attention=%s fallback_category=%s",
+            cve.get("cve_id"),
+            fallback["attention_needed"],
+            fallback["status_category"],
+        )
         cve["attention"] = fallback
         return fallback
 
     payload = compact_ai_payload(cve, evidence)
+    logger.info(
+        "Groq CVE classifier request prepared | cve=%s model=%s url=%s payload=%s",
+        cve.get("cve_id"),
+        GROQ_MODEL,
+        GROQ_API_URL,
+        json.dumps(payload, ensure_ascii=False, sort_keys=True)[:4000],
+    )
     messages = [
         {
             "role": "system",
@@ -804,6 +886,7 @@ async def classify_cve_attention(
         "temperature": 0,
         "max_completion_tokens": 500,
     }
+    started_at = perf_counter()
     try:
         async with session.post(
             GROQ_API_URL,
@@ -812,13 +895,34 @@ async def classify_cve_attention(
             timeout=aiohttp.ClientTimeout(total=GROQ_TIMEOUT_SECONDS),
         ) as response:
             body = await response.text()
+            elapsed_ms = round((perf_counter() - started_at) * 1000, 2)
+            logger.info(
+                "Groq CVE classifier response received | cve=%s status=%s elapsed_ms=%s body_preview=%s",
+                cve.get("cve_id"),
+                response.status,
+                elapsed_ms,
+                body[:1200],
+            )
             if response.status >= 400:
                 raise RuntimeError(f"Groq returned HTTP {response.status}: {body[:500]}")
             data = json.loads(body)
             content = data["choices"][0]["message"]["content"]
+            logger.info(
+                "Groq CVE classifier model output | cve=%s content=%s",
+                cve.get("cve_id"),
+                content[:1200],
+            )
             ai = parse_json_object(content)
     except Exception as exc:
-        logger.warning("Groq CVE classifier failed; using fallback | cve=%s error=%s", cve.get("cve_id"), exc)
+        elapsed_ms = round((perf_counter() - started_at) * 1000, 2)
+        logger.warning(
+            "Groq CVE classifier failed; using fallback | cve=%s elapsed_ms=%s error=%s fallback_attention=%s fallback_category=%s",
+            cve.get("cve_id"),
+            elapsed_ms,
+            exc,
+            fallback["attention_needed"],
+            fallback["status_category"],
+        )
         cve["attention"] = fallback
         return fallback
 
@@ -837,11 +941,13 @@ async def classify_cve_attention(
     if result["recommended_action"]:
         cve["remediation"] = result["recommended_action"]
     logger.info(
-        "Groq CVE classification | cve=%s attention=%s status_category=%s confidence=%s",
+        "Groq CVE classification parsed | cve=%s attention=%s status_category=%s confidence=%s target_status_summary=%s reason=%s",
         cve.get("cve_id"),
         result["attention_needed"],
         result["status_category"],
         result["confidence"],
+        json.dumps(result["target_status_summary"], sort_keys=True),
+        result["reason"],
     )
     return result
 
@@ -1023,6 +1129,13 @@ async def on_startup() -> None:
     )
     await init_db()
     logger.info("Server running at http://localhost:8000")
+    logger.info(
+        "CVE pipeline config | delay_seconds=%s groq_enabled=%s groq_model=%s groq_url=%s",
+        CVE_REQUEST_DELAY_SECONDS,
+        bool(os.environ.get("GROQ_API_KEY")),
+        GROQ_MODEL,
+        GROQ_API_URL,
+    )
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -1199,6 +1312,32 @@ async def get_workspace(
     return {**dict(workspace), "files": files, "reports": reports}
 
 
+@app.get("/api/workspaces/{workspace_id}/cves")
+async def list_workspace_cves(
+    workspace_id: int,
+    user: dict[str, Any] = Depends(require_role("researcher")),
+) -> dict[str, Any]:
+    async with db_connect() as db:
+        await get_workspace_for_researcher(db, workspace_id, user["id"])
+        cursor = await db.execute("SELECT * FROM scan_files WHERE workspace_id = ? ORDER BY uploaded_at ASC", (workspace_id,))
+        files = [dict(row) for row in await cursor.fetchall()]
+
+    logger.info(
+        "Local CVE extraction requested | workspace_id=%s user_id=%s username=%s file_count=%s",
+        workspace_id,
+        user["id"],
+        user["username"],
+        len(files),
+    )
+    result = await collect_file_cves(workspace_id, files)
+    logger.info(
+        "Local CVE extraction completed | workspace_id=%s unique_cve_count=%s",
+        workspace_id,
+        result["total"],
+    )
+    return result
+
+
 @app.delete("/api/workspaces/{workspace_id}")
 async def delete_workspace(
     workspace_id: int,
@@ -1260,6 +1399,7 @@ async def upload_files(
                 }
             )
         await db.commit()
+    PARSE_CACHE.pop(workspace_id, None)
     return {"files": results}
 
 
@@ -1295,6 +1435,7 @@ async def parse_workspace(
 ) -> StreamingResponse:
     async with db_connect() as db:
         workspace = await get_workspace_for_researcher(db, workspace_id, user["id"])
+        workspace = dict(workspace)
         cursor = await db.execute("SELECT * FROM scan_files WHERE workspace_id = ? ORDER BY uploaded_at ASC", (workspace_id,))
         files = [dict(row) for row in await cursor.fetchall()]
 
@@ -1370,11 +1511,13 @@ async def parse_workspace(
                         total,
                         cve_id,
                     )
+                    yield "event: progress\n"
+                    yield f"data: {json.dumps({'current': index, 'total': total, 'cve_id': cve_id, 'status': 'running', 'message': 'Checking CVE API and AI status gate'})}\n\n"
                     cve_data = await query_cve(session, workspace["os"], cve_id)
                     classification = await classify_cve_attention(session, workspace, cve_data)
                     all_cves.append(cve_data)
                     logger.info(
-                        "CVE API queue item completed | workspace_id=%s current=%s total=%s cve=%s severity=%s attention=%s status_category=%s",
+                        "CVE API queue item completed | workspace_id=%s current=%s total=%s cve=%s severity=%s attention=%s status_category=%s classifier=%s confidence=%s",
                         workspace_id,
                         index,
                         total,
@@ -1382,9 +1525,11 @@ async def parse_workspace(
                         cve_data["severity"],
                         classification["attention_needed"],
                         classification["status_category"],
+                        classification.get("provider"),
+                        classification.get("confidence"),
                     )
                     yield "event: progress\n"
-                    yield f"data: {json.dumps({'current': index, 'total': total, 'cve_id': cve_id, 'status': 'ok', 'severity': cve_data['severity'], 'attention_needed': classification['attention_needed'], 'status_category': classification['status_category']})}\n\n"
+                    yield f"data: {json.dumps({'current': index, 'total': total, 'cve_id': cve_id, 'status': 'ok', 'severity': cve_data['severity'], 'attention_needed': classification['attention_needed'], 'status_category': classification['status_category'], 'classifier': classification.get('provider'), 'confidence': classification.get('confidence'), 'reason': classification.get('reason'), 'status_summary': classification.get('status_summary'), 'target_status_summary': classification.get('target_status_summary')})}\n\n"
                 except Exception as exc:
                     logger.warning(
                         "CVE API queue item skipped | workspace_id=%s current=%s total=%s cve=%s error=%s",
@@ -1405,12 +1550,19 @@ async def parse_workspace(
                     }
                     parse_errors.append(error)
                     failed_record = build_failed_cve_record(cve_id, workspace["os"], exc)
-                    await classify_cve_attention(session, workspace, failed_record)
+                    classification = await classify_cve_attention(session, workspace, failed_record)
                     all_cves.append(failed_record)
                     yield "event: progress\n"
-                    yield f"data: {json.dumps({'current': index, 'total': total, 'cve_id': cve_id, 'status': 'error', 'message': str(exc)})}\n\n"
+                    yield f"data: {json.dumps({'current': index, 'total': total, 'cve_id': cve_id, 'status': 'error', 'message': str(exc), 'attention_needed': classification['attention_needed'], 'status_category': classification['status_category'], 'classifier': classification.get('provider'), 'confidence': classification.get('confidence'), 'reason': classification.get('reason'), 'status_summary': classification.get('status_summary'), 'target_status_summary': classification.get('target_status_summary')})}\n\n"
                 if index < total:
-                    await asyncio.sleep(1)
+                    logger.info(
+                        "CVE pipeline rate limit wait | workspace_id=%s completed=%s remaining=%s delay_seconds=%s",
+                        workspace_id,
+                        index,
+                        total - index,
+                        CVE_REQUEST_DELAY_SECONDS,
+                    )
+                    await asyncio.sleep(CVE_REQUEST_DELAY_SECONDS)
 
         needs_attention = [item for item in all_cves if (item.get("attention") or {}).get("attention_needed") is True]
         filtered_out = [
@@ -1470,7 +1622,7 @@ async def save_report(
 ) -> dict[str, Any]:
     parsed = PARSE_CACHE.get(workspace_id)
     if not parsed:
-        raise api_error(422, "Validation failed", "Run Bulk Parse before saving a report")
+        raise api_error(422, "Validation failed", "Run Classify before saving a report")
     report_summary = {
         "all_cves": parsed.get("needs_attention", []),
         "needs_attention": parsed.get("needs_attention", []),
@@ -1478,7 +1630,8 @@ async def save_report(
         "reviewed_total": parsed.get("reviewed_total", len(parsed.get("all_cves", []))),
         "filtered_out_count": len(parsed.get("filtered_out", [])),
         "classifier": "groq" if os.environ.get("GROQ_API_KEY") else "fallback",
-        "report_policy": "status-first attention-needed only",
+        "ai_cross_verification": bool(os.environ.get("GROQ_API_KEY")),
+        "report_policy": "status-first attention-needed only after classifier review",
     }
     counts = severity_counts(report_summary["all_cves"])
 

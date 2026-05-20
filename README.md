@@ -16,6 +16,8 @@ uvicorn server:app --host 0.0.0.0 --port 8000 --reload
 
 ## Optional Groq AI CVE Classifier
 
+See [.env.example](.env.example) for all supported environment variables.
+
 Set this before running the server to enable AI status classification:
 
 ```bash
@@ -29,6 +31,12 @@ $env:GROQ_MODEL="llama-3.3-70b-versatile"
 ```
 
 If `GROQ_API_KEY` is not set, the app uses a local fallback classifier. Saved reports include only CVEs marked as attention needed for the selected OS/version.
+
+The CVE pipeline waits 5 seconds between CVE items by default to reduce upstream rate-limit risk:
+
+```bash
+$env:CVE_REQUEST_DELAY_SECONDS="5"
+```
 
 Open:
 

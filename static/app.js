@@ -203,6 +203,7 @@ async function openWorkspace(id) {
   $("#progress-bar").style.width = "0%";
   $("#save-report-button").disabled = true;
   setView("workspace-detail");
+  await loadDetectedCves(workspace.id);
 }
 
 function renderFiles(files) {
@@ -218,6 +219,92 @@ function renderFiles(files) {
         )
         .join("")
     : `<div class="empty-state">No files uploaded.</div>`;
+}
+
+async function loadDetectedCves(workspaceId) {
+  const list = $("#detected-cve-list");
+  const status = $("#cve-list-status");
+  status.textContent = "Extracting from uploaded files";
+  list.innerHTML = `<div class="empty-state">Reading scan files...</div>`;
+  try {
+    const result = await api(`/api/workspaces/${workspaceId}/cves`);
+    renderDetectedCves(result.items || []);
+    status.textContent = result.total ? `${result.total} unique CVEs detected` : "No CVEs detected";
+  } catch (error) {
+    status.textContent = "Extraction failed";
+    list.innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
+  }
+}
+
+function renderDetectedCves(items) {
+  $("#detected-cve-list").innerHTML = items.length
+    ? items
+        .map(
+          (item) => `
+        <div class="detected-cve-row" id="detected-${escapeHtml(item.cve_id)}">
+          <div class="detected-cve-main">
+            <div>
+              <span class="cve-id">${escapeHtml(item.cve_id)}</span>
+              <span class="cve-live-pill status-pending" data-cve-live-pill>Listed</span>
+            </div>
+            <span class="detected-cve-files">${escapeHtml((item.files || []).join(", "))}</span>
+          </div>
+          <div class="detected-cve-live" data-cve-live>Waiting for classification</div>
+        </div>
+      `
+        )
+        .join("")
+    : `<div class="empty-state">No CVEs found in uploaded files.</div>`;
+}
+
+function resetDetectedCveRows() {
+  $$(".detected-cve-row").forEach((row) => {
+    row.classList.remove("is-running", "is-attention", "is-filtered", "is-error");
+    const pill = row.querySelector("[data-cve-live-pill]");
+    const live = row.querySelector("[data-cve-live]");
+    if (pill) {
+      pill.className = "cve-live-pill status-pending";
+      pill.textContent = "Queued";
+    }
+    if (live) live.textContent = "Waiting for classification";
+  });
+}
+
+function updateDetectedCveRow(data) {
+  if (!data.cve_id) return;
+  const row = document.getElementById(`detected-${data.cve_id}`);
+  if (!row) return;
+
+  const pill = row.querySelector("[data-cve-live-pill]");
+  const live = row.querySelector("[data-cve-live]");
+  row.classList.remove("is-running", "is-attention", "is-filtered", "is-error");
+
+  if (data.status === "running") {
+    row.classList.add("is-running");
+    if (pill) {
+      pill.className = "cve-live-pill status-running";
+      pill.textContent = "Checking";
+    }
+    if (live) live.textContent = "Calling CVE API, then cross-verifying status with AI";
+    row.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    return;
+  }
+
+  const verifier = data.classifier === "groq" ? "Groq verified" : "Fallback checked";
+  const category = data.status_category || "unknown";
+  const confidence = data.confidence ? ` (${data.confidence})` : "";
+  const decision = data.attention_needed ? "Attention needed" : "Filtered out";
+  const statusClass = data.status === "error" ? "status-error" : data.attention_needed ? "status-attention" : "status-filtered";
+
+  row.classList.add(data.status === "error" ? "is-error" : data.attention_needed ? "is-attention" : "is-filtered");
+  if (pill) {
+    pill.className = `cve-live-pill ${statusClass}`;
+    pill.textContent = decision;
+  }
+  if (live) {
+    const reason = data.reason ? ` - ${data.reason}` : "";
+    live.textContent = `Status: ${category} | ${verifier}${confidence} | ${decision}${reason}`;
+  }
 }
 
 function renderWorkspaceReports(reports) {
@@ -313,11 +400,15 @@ function appendLog(line) {
 
 async function parseWorkspace() {
   if (!state.currentWorkspace) return;
-  $("#parse-button").disabled = true;
+  const classifyButton = $("#parse-button");
+  classifyButton.disabled = true;
+  classifyButton.textContent = "Classifying...";
   $("#save-report-button").disabled = true;
   $("#live-log").textContent = "";
-  $("#parse-status").textContent = "Parsing";
+  $("#parse-status").textContent = "Classifying";
   $("#progress-bar").style.width = "0%";
+  resetDetectedCveRows();
+  appendLog("[start] CVE API checks and Groq cross-verification started");
 
   try {
     const response = await fetch(`/api/workspaces/${state.currentWorkspace.id}/parse`, {
@@ -326,7 +417,7 @@ async function parseWorkspace() {
     });
     if (!response.ok || !response.body) {
       const payload = await response.json();
-      throw new Error(payload.detail || payload.error || "Parse failed");
+      throw new Error(payload.detail || payload.error || "Classification failed");
     }
 
     const reader = response.body.getReader();
@@ -344,7 +435,8 @@ async function parseWorkspace() {
     toast(error.message);
     $("#parse-status").textContent = "Failed";
   } finally {
-    $("#parse-button").disabled = false;
+    classifyButton.disabled = false;
+    classifyButton.textContent = "Classify";
   }
 }
 
@@ -356,21 +448,29 @@ function handleSseEvent(raw) {
   const data = JSON.parse(dataLine.replace("data:", "").trim());
 
   if (event === "progress") {
-    const percent = data.total ? Math.round((data.current / data.total) * 100) : 0;
+    updateDetectedCveRow(data);
+    const completed = data.status === "running" ? data.current - 1 : data.current;
+    const percent = data.total ? Math.round((completed / data.total) * 100) : 0;
     $("#progress-bar").style.width = `${percent}%`;
     $("#parse-status").textContent = `${data.current} / ${data.total}`;
-    if (data.status === "ok") {
-      appendLog(`[ok] ${data.cve_id} - ${data.severity} - ${data.attention_needed ? "attention needed" : "filtered"}${data.status_category ? ` (${data.status_category})` : ""}`);
+    const verifier = data.classifier === "groq" ? "Groq verified" : "fallback checked";
+    const category = data.status_category || "unknown";
+    const confidence = data.confidence ? `, ${data.confidence}` : "";
+    if (data.status === "running") {
+      appendLog(`[scan] ${data.cve_id} - checking CVE API and AI status gate`);
+    } else if (data.status === "ok") {
+      appendLog(`[classify] ${data.cve_id} - ${category} - ${verifier}${confidence} - ${data.attention_needed ? "attention needed" : "filtered"}`);
     } else {
-      appendLog(`[error] ${data.cve_id} - ${data.message}`);
+      appendLog(`[error] ${data.cve_id} - ${category} - ${verifier}${confidence} - ${data.message}`);
     }
   }
 
   if (event === "done") {
     $("#progress-bar").style.width = "100%";
     $("#parse-status").textContent = "Complete";
+    $("#cve-list-status").textContent = `Classification complete - ${data.needs_attention} attention needed, ${data.filtered_out || 0} filtered`;
     $("#save-report-button").disabled = false;
-    toast(`Parse complete - ${data.needs_attention} attention needed, ${data.filtered_out || 0} filtered`);
+    toast(`Classification complete - ${data.needs_attention} attention needed, ${data.filtered_out || 0} filtered`);
   }
 }
 
