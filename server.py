@@ -1140,7 +1140,7 @@ async def on_startup() -> None:
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(request=request, name="index.html", context={})
 
 
 @app.post("/api/auth/login")
