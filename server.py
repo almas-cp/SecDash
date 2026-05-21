@@ -37,6 +37,34 @@ DB_PATH = BASE_DIR / "database.db"
 UPLOAD_DIR = BASE_DIR / "uploads"
 STATIC_DIR = BASE_DIR / "static"
 TEMPLATE_DIR = BASE_DIR / "templates"
+ENV_PATH = BASE_DIR / ".env"
+
+
+def load_env_file(path: Path) -> dict[str, Any]:
+    result: dict[str, Any] = {"path": str(path), "found": path.exists(), "loaded": [], "skipped": []}
+    if not path.exists():
+        return result
+
+    with path.open("r", encoding="utf-8", errors="ignore") as handle:
+        for line_number, raw_line in enumerate(handle, start=1):
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if not key:
+                result["skipped"].append(f"line:{line_number}")
+                continue
+            if key in os.environ:
+                result["skipped"].append(key)
+                continue
+            os.environ[key] = value
+            result["loaded"].append(key)
+    return result
+
+
+ENV_FILE_STATUS = load_env_file(ENV_PATH)
 
 SECRET_KEY = os.environ.get("SECDASH_SECRET_KEY", "sec-dash-dev-secret-change-me")
 SESSION_COOKIE = "session_token"
@@ -82,6 +110,16 @@ logger = logging.getLogger("secdash")
 
 # Last parsed result per workspace. This is intentionally temporary; saved reports persist in SQLite.
 PARSE_CACHE: dict[int, dict[str, Any]] = {}
+
+
+def groq_key_status() -> dict[str, Any]:
+    key = os.environ.get("GROQ_API_KEY", "").strip()
+    if not key:
+        return {"enabled": False, "state": "missing", "masked": "-"}
+    if key == "your_groq_api_key_here" or key.lower().startswith(("your_", "replace_", "change_me")):
+        return {"enabled": False, "state": "placeholder", "masked": "-"}
+    masked = f"{key[:6]}...{key[-4:]}" if len(key) >= 12 else "***"
+    return {"enabled": True, "state": "configured", "masked": masked}
 
 
 class LoginPayload(BaseModel):
@@ -826,7 +864,8 @@ async def classify_cve_attention(
     workspace = dict(workspace)
     evidence = build_status_evidence(cve, workspace)
     fallback = fallback_attention_classification(cve, evidence)
-    api_key = os.environ.get("GROQ_API_KEY")
+    key_status = groq_key_status()
+    api_key = os.environ.get("GROQ_API_KEY") if key_status["enabled"] else None
     logger.info(
         "CVE status evidence built | cve=%s target=%s/%s api_status=%s status_summary=%s target_status_summary=%s fallback_attention=%s fallback_category=%s",
         cve.get("cve_id"),
@@ -840,8 +879,9 @@ async def classify_cve_attention(
     )
     if not api_key:
         logger.info(
-            "Groq CVE classifier skipped | cve=%s reason=GROQ_API_KEY not set fallback_attention=%s fallback_category=%s",
+            "Groq CVE classifier skipped | cve=%s reason=GROQ_API_KEY %s fallback_attention=%s fallback_category=%s",
             cve.get("cve_id"),
+            key_status["state"],
             fallback["attention_needed"],
             fallback["status_category"],
         )
@@ -1128,11 +1168,28 @@ async def on_startup() -> None:
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
     )
     await init_db()
+    key_status = groq_key_status()
     logger.info("Server running at http://localhost:8000")
+    logger.info(
+        "Environment file status | path=%s found=%s loaded=%s skipped_existing=%s",
+        ENV_FILE_STATUS["path"],
+        ENV_FILE_STATUS["found"],
+        ",".join(ENV_FILE_STATUS["loaded"]) if ENV_FILE_STATUS["loaded"] else "-",
+        ",".join(ENV_FILE_STATUS["skipped"]) if ENV_FILE_STATUS["skipped"] else "-",
+    )
+    logger.info(
+        "Groq configuration | enabled=%s key_state=%s key=%s model=%s url=%s timeout_seconds=%s",
+        key_status["enabled"],
+        key_status["state"],
+        key_status["masked"],
+        GROQ_MODEL,
+        GROQ_API_URL,
+        GROQ_TIMEOUT_SECONDS,
+    )
     logger.info(
         "CVE pipeline config | delay_seconds=%s groq_enabled=%s groq_model=%s groq_url=%s",
         CVE_REQUEST_DELAY_SECONDS,
-        bool(os.environ.get("GROQ_API_KEY")),
+        key_status["enabled"],
         GROQ_MODEL,
         GROQ_API_URL,
     )
@@ -1498,7 +1555,7 @@ async def parse_workspace(
             PARSE_CACHE[workspace_id] = summary
             logger.info("CVE parse job completed | workspace_id=%s total=0 needs_attention=0", workspace_id)
             yield "event: done\n"
-            yield f"data: {json.dumps({'total': 0, 'needs_attention': 0, 'filtered_out': 0, 'classifier': 'groq' if os.environ.get('GROQ_API_KEY') else 'fallback', 'critical': 0, 'high': 0, 'medium': 0, 'low': 0, 'unknown': 0})}\n\n"
+            yield f"data: {json.dumps({'total': 0, 'needs_attention': 0, 'filtered_out': 0, 'classifier': 'groq' if groq_key_status()['enabled'] else 'fallback', 'critical': 0, 'high': 0, 'medium': 0, 'low': 0, 'unknown': 0})}\n\n"
             return
 
         async with aiohttp.ClientSession() as session:
@@ -1589,7 +1646,7 @@ async def parse_workspace(
             "total": total,
             "needs_attention": len(needs_attention),
             "filtered_out": len(filtered_out),
-            "classifier": "groq" if os.environ.get("GROQ_API_KEY") else "fallback",
+            "classifier": "groq" if groq_key_status()["enabled"] else "fallback",
             "critical": counts["critical"],
             "high": counts["high"],
             "medium": counts["medium"],
@@ -1629,8 +1686,8 @@ async def save_report(
         "parse_errors": parsed.get("parse_errors", []),
         "reviewed_total": parsed.get("reviewed_total", len(parsed.get("all_cves", []))),
         "filtered_out_count": len(parsed.get("filtered_out", [])),
-        "classifier": "groq" if os.environ.get("GROQ_API_KEY") else "fallback",
-        "ai_cross_verification": bool(os.environ.get("GROQ_API_KEY")),
+        "classifier": "groq" if groq_key_status()["enabled"] else "fallback",
+        "ai_cross_verification": groq_key_status()["enabled"],
         "report_policy": "status-first attention-needed only after classifier review",
     }
     counts = severity_counts(report_summary["all_cves"])
