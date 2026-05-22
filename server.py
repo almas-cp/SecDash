@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import secrets
+import xml.etree.ElementTree as ET
 from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
@@ -30,6 +31,28 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, Signer
 from pydantic import BaseModel
+
+
+CVE_PATTERN = re.compile(r"CVE-\d{4}-\d{4,7}", re.IGNORECASE)
+COMMON_PORT_SERVICES = {
+    "21": "ftp",
+    "22": "ssh",
+    "25": "smtp",
+    "53": "dns",
+    "80": "http",
+    "110": "pop3",
+    "143": "imap",
+    "443": "https",
+    "465": "smtps",
+    "587": "submission",
+    "993": "imaps",
+    "995": "pop3s",
+    "3306": "mysql",
+    "5432": "postgresql",
+    "6379": "redis",
+    "8080": "http-alt",
+    "8443": "https-alt",
+}
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -296,20 +319,303 @@ def severity_rank(value: Any) -> int:
     return {"UNKNOWN": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}.get(normalize_severity(value), 0)
 
 
+def xml_name(element: ET.Element) -> str:
+    return element.tag.rsplit("}", 1)[-1].lower()
+
+
+def child_by_name(element: ET.Element, name: str) -> ET.Element | None:
+    wanted = name.lower()
+    for child in list(element):
+        if xml_name(child) == wanted:
+            return child
+    return None
+
+
+def child_text(element: ET.Element, name: str) -> str | None:
+    child = child_by_name(element, name)
+    if child is None:
+        return None
+    text = "".join(child.itertext()).strip()
+    return text or None
+
+
+def clean_port(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    match = re.search(r"\d{1,5}", text)
+    if not match:
+        return None
+    port = int(match.group(0))
+    if port < 1 or port > 65535:
+        return None
+    return str(port)
+
+
+def service_label(port: Any = None, service: Any = None) -> str:
+    cleaned = str(service or "").strip()
+    if cleaned:
+        return cleaned
+    port_text = clean_port(port)
+    return COMMON_PORT_SERVICES.get(port_text or "", "unknown")
+
+
+def add_service(
+    services: list[dict[str, Any]],
+    *,
+    port: Any,
+    proto: Any = "tcp",
+    state: Any = "open",
+    service: Any = None,
+    product: Any = None,
+    version: Any = None,
+    extra: Any = None,
+    ip: Any = None,
+    source: str | None = None,
+    cpes: list[str] | None = None,
+    cves: list[str] | None = None,
+) -> None:
+    port_text = clean_port(port)
+    if not port_text:
+        return
+    item = {
+        "port": port_text,
+        "proto": str(proto or "tcp").strip().lower(),
+        "state": str(state or "open").strip().lower(),
+        "service": service_label(port_text, service),
+        "product": str(product or "").strip(),
+        "version": str(version or "").strip(),
+        "extra": str(extra or "").strip(),
+        "ip": str(ip or "").strip(),
+        "source": source or "",
+        "cpes": cpes or [],
+        "cves": sorted(set(cves or [])),
+    }
+    key = (
+        item["port"],
+        item["proto"],
+        item["state"],
+        item["service"],
+        item["product"],
+        item["version"],
+        item["extra"],
+    )
+    existing_keys = {
+        (
+            existing.get("port"),
+            existing.get("proto"),
+            existing.get("state"),
+            existing.get("service"),
+            existing.get("product"),
+            existing.get("version"),
+            existing.get("extra"),
+        )
+        for existing in services
+    }
+    if key not in existing_keys:
+        services.append(item)
+    else:
+        for existing in services:
+            existing_key = (
+                existing.get("port"),
+                existing.get("proto"),
+                existing.get("state"),
+                existing.get("service"),
+                existing.get("product"),
+                existing.get("version"),
+                existing.get("extra"),
+            )
+            if existing_key == key:
+                existing["cves"] = sorted(set((existing.get("cves") or []) + item["cves"]))
+                existing["cpes"] = sorted(set((existing.get("cpes") or []) + item["cpes"]))
+                break
+
+
+def parse_target_port(target: Any) -> tuple[str | None, str | None]:
+    text = str(target or "").strip()
+    match = re.search(r"(?P<ip>\d{1,3}(?:\.\d{1,3}){3})?(?::(?P<port>\d{1,5}))$", text)
+    if not match:
+        return None, clean_port(text)
+    return match.group("ip"), clean_port(match.group("port"))
+
+
+def extract_cves_from_text(text: str) -> list[str]:
+    return sorted({cve.upper() for cve in CVE_PATTERN.findall(text or "")})
+
+
+def parse_json_scan_summary(path: Path, text: str) -> dict[str, Any]:
+    cves = set(extract_cves_from_text(text))
+    services: list[dict[str, Any]] = []
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return {"cves": sorted(cves), "services": services}
+
+    items = data if isinstance(data, list) else [data]
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item_cves = extract_cves_from_text(json.dumps(item, ensure_ascii=False))
+        ip = item.get("ip") or item.get("host") or item.get("target")
+        for port_item in as_list(item.get("ports")):
+            if not isinstance(port_item, dict):
+                continue
+            port_cves = extract_cves_from_text(json.dumps(port_item, ensure_ascii=False))
+            add_service(
+                services,
+                port=port_item.get("port") or port_item.get("portid"),
+                proto=port_item.get("proto") or port_item.get("protocol"),
+                state=port_item.get("status") or port_item.get("state"),
+                service=port_item.get("service") or port_item.get("name"),
+                product=port_item.get("product"),
+                version=port_item.get("version"),
+                extra=port_item.get("reason"),
+                ip=ip,
+                source=path.name,
+                cves=port_cves,
+            )
+        if "banner" in item or "target" in item:
+            target_ip, target_port = parse_target_port(item.get("target"))
+            banner = as_dict(item.get("banner"))
+            software = banner.get("software") or banner.get("raw") or ""
+            add_service(
+                services,
+                port=target_port,
+                proto="tcp",
+                state="open",
+                service="ssh" if target_port == "22" else None,
+                product=software,
+                ip=target_ip or ip,
+                source=path.name,
+                cves=item_cves,
+            )
+        for cve in as_list(item.get("cves")):
+            if isinstance(cve, str):
+                cves.update(extract_cves_from_text(cve))
+            elif isinstance(cve, dict):
+                cves.update(extract_cves_from_text(json.dumps(cve, ensure_ascii=False)))
+
+    return {"cves": sorted(cves), "services": services}
+
+
+def parse_xml_scan_summary(path: Path, text: str) -> dict[str, Any]:
+    cves = set(extract_cves_from_text(text))
+    services: list[dict[str, Any]] = []
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError:
+        return {"cves": sorted(cves), "services": services}
+
+    for port in root.iter():
+        if xml_name(port) != "port":
+            continue
+        port_cves = extract_cves_from_text(ET.tostring(port, encoding="unicode", method="xml"))
+        port_id = port.attrib.get("portid") or (port.text or "").strip()
+        proto = port.attrib.get("protocol") or "tcp"
+        state_node = child_by_name(port, "state")
+        state = state_node.attrib.get("state") if state_node is not None else "open"
+        service_node = child_by_name(port, "service")
+        service = service_node.attrib.get("name") if service_node is not None else None
+        product = service_node.attrib.get("product") if service_node is not None else None
+        version = service_node.attrib.get("version") if service_node is not None else None
+        extra = service_node.attrib.get("extrainfo") if service_node is not None else None
+        cpes = []
+        if service_node is not None:
+            cpes = [("".join(cpe.itertext()).strip()) for cpe in service_node if xml_name(cpe) == "cpe"]
+        add_service(
+            services,
+            port=port_id,
+            proto=proto,
+            state=state,
+            service=service,
+            product=product,
+            version=version,
+            extra=extra,
+            source=path.name,
+            cpes=[cpe for cpe in cpes if cpe],
+            cves=port_cves,
+        )
+
+    for detail in root.iter():
+        if xml_name(detail) == "scandetails":
+            target_port = detail.attrib.get("targetport")
+            site = detail.attrib.get("sitename") or detail.attrib.get("siteip") or ""
+            add_service(
+                services,
+                port=target_port,
+                proto="tcp",
+                state="open",
+                service="https" if str(site).lower().startswith("https://") else "http",
+                ip=detail.attrib.get("targetip"),
+                source=path.name,
+            )
+
+    for result in root.iter():
+        if xml_name(result) != "result":
+            continue
+        port_value = child_text(result, "port")
+        if port_value:
+            result_cves = extract_cves_from_text(ET.tostring(result, encoding="unicode", method="xml"))
+            add_service(
+                services,
+                port=port_value,
+                proto="udp" if "/udp" in port_value.lower() else "tcp",
+                state="open",
+                service=None,
+                ip=child_text(result, "host"),
+                source=path.name,
+                cves=result_cves,
+            )
+
+    return {"cves": sorted(cves), "services": services}
+
+
+def parse_scan_file(filepath: str) -> dict[str, Any]:
+    path = Path(filepath)
+    text = path.read_text(errors="ignore", encoding="utf-8")
+    suffix = path.suffix.lower()
+    if suffix == ".json":
+        return parse_json_scan_summary(path, text)
+    if suffix == ".xml":
+        return parse_xml_scan_summary(path, text)
+    return {"cves": extract_cves_from_text(text), "services": []}
+
+
 def parse_nmap_file(filepath: str) -> list[str]:
     """
     Parse an nmap scan file and return CVE IDs.
 
-    TODO: Replace regex stub with a format-aware parser once sample files are finalized.
+    Kept as the CVE-only compatibility wrapper around the richer scan parser.
     """
-    with open(filepath, "r", errors="ignore", encoding="utf-8") as handle:
-        content = handle.read()
-    cves = re.findall(r"CVE-\d{4}-\d{4,7}", content, re.IGNORECASE)
-    return sorted({cve.upper() for cve in cves})
+    return parse_scan_file(filepath)["cves"]
+
+
+def cached_classification_map(workspace_id: int) -> dict[str, dict[str, Any]]:
+    cached = PARSE_CACHE.get(workspace_id) or {}
+    result: dict[str, dict[str, Any]] = {}
+    for item in (cached.get("needs_attention") or []) + (cached.get("filtered_out") or []):
+        cve_id = item.get("cve_id")
+        attention = item.get("attention") or {}
+        if not cve_id or not attention:
+            continue
+        result[cve_id] = {
+            "cve_id": cve_id,
+            "status": "ok",
+            "severity": item.get("severity"),
+            "attention_needed": attention.get("attention_needed"),
+            "status_category": attention.get("status_category"),
+            "classifier": attention.get("provider"),
+            "confidence": attention.get("confidence"),
+            "reason": attention.get("reason"),
+            "status_summary": attention.get("status_summary"),
+            "target_status_summary": attention.get("target_status_summary"),
+        }
+    return result
 
 
 async def collect_file_cves(workspace_id: int, files: list[dict[str, Any]]) -> dict[str, Any]:
     source_map: dict[str, list[str]] = {}
+    service_map: dict[tuple[Any, ...], dict[str, Any]] = {}
     file_results: list[dict[str, Any]] = []
 
     for item in files:
@@ -329,20 +635,39 @@ async def collect_file_cves(workspace_id: int, files: list[dict[str, Any]]) -> d
                     "status": "missing",
                     "cve_count": 0,
                     "cves": [],
+                    "service_count": 0,
                 }
             )
             continue
 
-        parsed = await asyncio.to_thread(parse_nmap_file, str(absolute))
+        parsed_summary = await asyncio.to_thread(parse_scan_file, str(absolute))
+        parsed = parsed_summary["cves"]
+        services = parsed_summary["services"]
         logger.info(
-            "Uploaded scan file locally extracted | workspace_id=%s file_id=%s filename=%s cve_count=%s",
+            "Uploaded scan file locally extracted | workspace_id=%s file_id=%s filename=%s cve_count=%s service_count=%s",
             workspace_id,
             item["id"],
             item["filename"],
             len(parsed),
+            len(services),
         )
         for cve_id in parsed:
             source_map.setdefault(cve_id, []).append(item["filename"])
+        for service in services:
+            key = (
+                service.get("port"),
+                service.get("proto"),
+                service.get("state"),
+            )
+            existing = service_map.setdefault(key, {**service, "files": []})
+            if existing.get("service") in {"", "unknown"} and service.get("service"):
+                existing["service"] = service["service"]
+            for field in ("product", "version", "extra", "ip"):
+                if not existing.get(field) and service.get(field):
+                    existing[field] = service[field]
+            existing["cpes"] = sorted(set((existing.get("cpes") or []) + (service.get("cpes") or [])))
+            existing["cves"] = sorted(set((existing.get("cves") or []) + (service.get("cves") or [])))
+            existing.setdefault("files", []).append(item["filename"])
         file_results.append(
             {
                 "id": item["id"],
@@ -350,18 +675,35 @@ async def collect_file_cves(workspace_id: int, files: list[dict[str, Any]]) -> d
                 "status": "ok",
                 "cve_count": len(parsed),
                 "cves": parsed,
+                "service_count": len(services),
             }
         )
 
-    items = [
-        {
+    classifications = cached_classification_map(workspace_id)
+    items = []
+    for cve_id, filenames in sorted(source_map.items()):
+        item = {
             "cve_id": cve_id,
             "files": sorted(set(filenames)),
             "file_count": len(set(filenames)),
         }
-        for cve_id, filenames in sorted(source_map.items())
-    ]
-    return {"items": items, "files": file_results, "total": len(items)}
+        if cve_id in classifications:
+            item["classification"] = classifications[cve_id]
+        items.append(item)
+    services = []
+    for service in service_map.values():
+        filenames = sorted(set(service.get("files") or []))
+        services.append({**service, "files": filenames, "file_count": len(filenames)})
+    services.sort(key=lambda item: (int(item.get("port") or 0), item.get("proto") or "", item.get("service") or ""))
+    return {
+        "items": items,
+        "files": file_results,
+        "services": services,
+        "classifications": classifications,
+        "total": len(items),
+        "service_total": len(services),
+        "classified_total": len(classifications),
+    }
 
 
 def clean_text(value: Any) -> str | None:

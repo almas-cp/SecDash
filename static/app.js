@@ -195,6 +195,8 @@ async function openWorkspace(id) {
     <div class="metric-card"><p class="muted">OS</p><strong>${escapeHtml(workspace.os)} ${escapeHtml(workspace.os_version)}</strong></div>
     <div class="metric-card"><p class="muted">Scan Date</p><strong>${escapeHtml(workspace.scan_date)}</strong></div>
     <div class="metric-card"><p class="muted">Created</p><strong>${escapeHtml(workspace.created_at)}</strong></div>
+    <div class="metric-card"><p class="muted">Open Ports</p><strong id="workspace-port-count">-</strong></div>
+    <div class="metric-card"><p class="muted">Services</p><strong id="workspace-service-count">-</strong></div>
   `;
   renderFiles(workspace.files || []);
   renderWorkspaceReports(workspace.reports || []);
@@ -224,16 +226,40 @@ function renderFiles(files) {
 async function loadDetectedCves(workspaceId) {
   const list = $("#detected-cve-list");
   const status = $("#cve-list-status");
+  const serviceList = $("#service-list");
+  const serviceStatus = $("#service-list-status");
   status.textContent = "Extracting from uploaded files";
+  serviceStatus.textContent = "Extracting from uploaded files";
   list.innerHTML = `<div class="empty-state">Reading scan files...</div>`;
+  serviceList.innerHTML = `<div class="empty-state">Reading scan files...</div>`;
   try {
     const result = await api(`/api/workspaces/${workspaceId}/cves`);
     renderDetectedCves(result.items || []);
-    status.textContent = result.total ? `${result.total} unique CVEs detected` : "No CVEs detected";
+    applyRestoredClassifications(result.classifications || {});
+    renderServices(result.services || [], result.classifications || {});
+    const classifiedText = result.classified_total ? `, ${result.classified_total} classified` : "";
+    status.textContent = result.total ? `${result.total} unique CVEs detected${classifiedText}` : "No CVEs detected";
+    serviceStatus.textContent = result.service_total ? `${result.service_total} ports/services detected` : "No services detected";
+    updateWorkspaceServiceMetrics(result.services || []);
+    if (result.classified_total) {
+      $("#save-report-button").disabled = false;
+      $("#parse-status").textContent = "Classified";
+      $("#progress-bar").style.width = "100%";
+    }
   } catch (error) {
     status.textContent = "Extraction failed";
+    serviceStatus.textContent = "Extraction failed";
     list.innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
+    serviceList.innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
   }
+}
+
+function updateWorkspaceServiceMetrics(services) {
+  const ports = new Set(services.map((item) => `${item.port}/${item.proto || "tcp"}`));
+  const portCount = $("#workspace-port-count");
+  const serviceCount = $("#workspace-service-count");
+  if (portCount) portCount.textContent = ports.size;
+  if (serviceCount) serviceCount.textContent = services.length;
 }
 
 function renderDetectedCves(items) {
@@ -257,6 +283,71 @@ function renderDetectedCves(items) {
     : `<div class="empty-state">No CVEs found in uploaded files.</div>`;
 }
 
+function applyRestoredClassifications(classifications) {
+  Object.values(classifications || {}).forEach((classification) => updateDetectedCveRow(classification));
+}
+
+function serviceName(item) {
+  const product = [item.product, item.version].filter(Boolean).join(" ");
+  return product || item.service || "unknown";
+}
+
+function renderServices(items, classifications = {}) {
+  $("#service-list").innerHTML = items.length
+    ? items
+        .map((item) => {
+          const endpoint = `${escapeHtml(item.port)}/${escapeHtml(item.proto || "tcp")}`;
+          const state = escapeHtml(item.state || "unknown");
+          const service = escapeHtml(serviceName(item));
+          const extra = item.extra ? `<span class="service-extra">${escapeHtml(item.extra)}</span>` : "";
+          const files = (item.files || []).join(", ");
+          const cves = item.cves || [];
+          const cveSummary = cves.length ? `${cves.length} CVEs` : "No CVEs linked";
+          return `
+        <details class="service-row">
+          <summary class="service-summary">
+            <div class="service-port">
+              <span class="service-endpoint">${endpoint}</span>
+              <span class="service-state">${state}</span>
+            </div>
+            <div class="service-details">
+              <strong>${service}</strong>
+              ${extra}
+              <span class="detected-cve-files">${escapeHtml(files)}</span>
+            </div>
+            <span class="service-cve-count">${escapeHtml(cveSummary)}</span>
+          </summary>
+          <div class="service-cve-list">
+            ${renderServiceCves(cves, classifications)}
+          </div>
+        </details>
+      `;
+        })
+        .join("")
+    : `<div class="empty-state">No ports or services found in uploaded files.</div>`;
+}
+
+function renderServiceCves(cves, classifications) {
+  return cves.length
+    ? cves
+        .map((cveId) => {
+          const classification = classifications[cveId] || {};
+          const label = classification.attention_needed === true ? "Attention" : classification.attention_needed === false ? "Filtered" : "Listed";
+          const pillClass = classification.attention_needed === true ? "status-attention" : classification.attention_needed === false ? "status-filtered" : "status-pending";
+          const category = classification.status_category ? ` - ${classification.status_category}` : "";
+          const verifier = classification.classifier === "groq" ? "Groq verified" : classification.classifier ? "Fallback checked" : "Waiting for classification";
+          return `
+        <div class="service-cve-row" data-service-cve="${escapeHtml(cveId)}">
+          <span class="cve-id">${escapeHtml(cveId)}</span>
+          <span class="cve-live-pill ${pillClass}" data-service-cve-pill>${label}</span>
+          <span class="service-cve-note" data-service-cve-note>${escapeHtml(`${verifier}${category}`)}</span>
+        </div>
+      `;
+        })
+        .join("")
+    : `<div class="empty-state">No CVEs linked to this service.</div>`;
+}
+
 function resetDetectedCveRows() {
   $$(".detected-cve-row").forEach((row) => {
     row.classList.remove("is-running", "is-attention", "is-filtered", "is-error");
@@ -273,6 +364,7 @@ function resetDetectedCveRows() {
 function updateDetectedCveRow(data) {
   if (!data.cve_id) return;
   const row = document.getElementById(`detected-${data.cve_id}`);
+  updateServiceCveRows(data);
   if (!row) return;
 
   const pill = row.querySelector("[data-cve-live-pill]");
@@ -305,6 +397,31 @@ function updateDetectedCveRow(data) {
     const reason = data.reason ? ` - ${data.reason}` : "";
     live.textContent = `Status: ${category} | ${verifier}${confidence} | ${decision}${reason}`;
   }
+}
+
+function updateServiceCveRows(data) {
+  const rows = $$(`[data-service-cve="${CSS.escape(data.cve_id)}"]`);
+  rows.forEach((row) => {
+    const pill = row.querySelector("[data-service-cve-pill]");
+    const note = row.querySelector("[data-service-cve-note]");
+    if (data.status === "running") {
+      if (pill) {
+        pill.className = "cve-live-pill status-running";
+        pill.textContent = "Checking";
+      }
+      if (note) note.textContent = "Checking source data and AI status gate";
+      return;
+    }
+    const verifier = data.classifier === "groq" ? "Groq verified" : data.classifier ? "Fallback checked" : "Waiting for classification";
+    const category = data.status_category || "unknown";
+    const label = data.status === "error" ? "Error" : data.attention_needed ? "Attention" : "Filtered";
+    const pillClass = data.status === "error" ? "status-error" : data.attention_needed ? "status-attention" : "status-filtered";
+    if (pill) {
+      pill.className = `cve-live-pill ${pillClass}`;
+      pill.textContent = label;
+    }
+    if (note) note.textContent = `${verifier} - ${category}`;
+  });
 }
 
 function renderWorkspaceReports(reports) {

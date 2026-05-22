@@ -422,14 +422,16 @@ h3 {
 
 .file-list,
 .compact-list,
-.detected-cve-list {
+.detected-cve-list,
+.service-list {
   display: grid;
   gap: 8px;
 }
 
 .file-row,
 .compact-row,
-.detected-cve-row {
+.detected-cve-row,
+.service-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -530,6 +532,106 @@ h3 {
 .detected-cve-row.is-error {
   border-color: #efd07d;
   background: #fff9e8;
+}
+
+.service-row {
+  display: block;
+}
+
+.service-summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.service-summary::-webkit-details-marker {
+  display: none;
+}
+
+.service-summary::after {
+  content: "Show";
+  margin-left: auto;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.service-row[open] .service-summary::after {
+  content: "Hide";
+}
+
+.service-port {
+  display: grid;
+  gap: 5px;
+  min-width: 92px;
+}
+
+.service-endpoint {
+  font-family: "IBM Plex Mono", Consolas, monospace;
+  font-size: 16px;
+  font-weight: 800;
+  color: #122343;
+}
+
+.service-state {
+  width: fit-content;
+  border-radius: 999px;
+  border: 1px solid #9bdaba;
+  background: #e0f8ed;
+  color: #136b4c;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.service-details {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.service-extra {
+  color: #40516e;
+  font-size: 13px;
+}
+
+.service-cve-count {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  border: 1px solid #cbd8ea;
+  background: #edf3fb;
+  color: #40516e;
+  padding: 3px 9px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.service-cve-list {
+  display: grid;
+  gap: 7px;
+  margin-top: 10px;
+  border-top: 1px solid rgba(183, 204, 240, 0.72);
+  padding-top: 10px;
+}
+
+.service-cve-row {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.5fr) auto minmax(180px, 1fr);
+  align-items: center;
+  gap: 10px;
+  border-radius: 8px;
+  background: #ffffff;
+  border: 1px solid #dbe6f5;
+  padding: 8px 10px;
+}
+
+.service-cve-note {
+  min-width: 0;
+  color: #40516e;
+  font-size: 13px;
 }
 
 .mono,
