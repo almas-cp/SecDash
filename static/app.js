@@ -150,8 +150,20 @@ function recordSeverity(record) {
   return String(record?.severity || "UNKNOWN").toUpperCase();
 }
 
+function normalizeStatusCategory(category) {
+  return String(category || "")
+    .toLowerCase()
+    .replaceAll("-", "_")
+    .replaceAll(" ", "_");
+}
+
+function isFixedStatus(category) {
+  return ["fixed", "released", "not_affected", "not_found", "not_listed", "dne", "ignored"].includes(normalizeStatusCategory(category));
+}
+
 function recordNeedsAttention(record) {
-  return record?.attention_needed === true || record?.attention?.attention_needed === true;
+  const attention = record?.attention || record || {};
+  return attention.attention_needed === true && !isFixedStatus(attention.status_category);
 }
 
 function serviceRiskStats(cveIds, lookup) {
@@ -421,8 +433,10 @@ function renderServiceCves(cves, classifications) {
     ? cves
         .map((cveId) => {
           const classification = classifications[cveId] || {};
-          const label = classification.attention_needed === true ? "Attention" : classification.attention_needed === false ? "Filtered" : "Listed";
-          const pillClass = classification.attention_needed === true ? "status-attention" : classification.attention_needed === false ? "status-filtered" : "status-pending";
+          const needsAttention = recordNeedsAttention(classification);
+          const hasDecision = classification.attention_needed === true || classification.attention_needed === false;
+          const label = needsAttention ? "Attention" : hasDecision ? "Fixed" : "Listed";
+          const pillClass = needsAttention ? "status-attention" : hasDecision ? "status-filtered" : "status-pending";
           const category = classification.status_category ? ` - ${classification.status_category}` : "";
           const verifier = classification.classifier === "groq" ? "Groq verified" : classification.classifier ? "Fallback checked" : "Waiting for classification";
           return `
@@ -474,10 +488,11 @@ function updateDetectedCveRow(data) {
   const verifier = data.classifier === "groq" ? "Groq verified" : "Fallback checked";
   const category = data.status_category || "unknown";
   const confidence = data.confidence ? ` (${data.confidence})` : "";
-  const decision = data.attention_needed ? "Attention needed" : "Filtered out";
-  const statusClass = data.status === "error" ? "status-error" : data.attention_needed ? "status-attention" : "status-filtered";
+  const needsAttention = recordNeedsAttention(data);
+  const decision = needsAttention ? "Attention needed" : "Fixed";
+  const statusClass = data.status === "error" ? "status-error" : needsAttention ? "status-attention" : "status-filtered";
 
-  row.classList.add(data.status === "error" ? "is-error" : data.attention_needed ? "is-attention" : "is-filtered");
+  row.classList.add(data.status === "error" ? "is-error" : needsAttention ? "is-attention" : "is-filtered");
   if (pill) {
     pill.className = `cve-live-pill ${statusClass}`;
     pill.textContent = decision;
@@ -503,8 +518,9 @@ function updateServiceCveRows(data) {
     }
     const verifier = data.classifier === "groq" ? "Groq verified" : data.classifier ? "Fallback checked" : "Waiting for classification";
     const category = data.status_category || "unknown";
-    const label = data.status === "error" ? "Error" : data.attention_needed ? "Attention" : "Filtered";
-    const pillClass = data.status === "error" ? "status-error" : data.attention_needed ? "status-attention" : "status-filtered";
+    const needsAttention = recordNeedsAttention(data);
+    const label = data.status === "error" ? "Error" : needsAttention ? "Attention" : "Fixed";
+    const pillClass = data.status === "error" ? "status-error" : needsAttention ? "status-attention" : "status-filtered";
     if (pill) {
       pill.className = `cve-live-pill ${pillClass}`;
       pill.textContent = label;
@@ -665,7 +681,7 @@ function handleSseEvent(raw) {
     if (data.status === "running") {
       appendLog(`[scan] ${data.cve_id} - checking CVE API and AI status gate`);
     } else if (data.status === "ok") {
-      appendLog(`[classify] ${data.cve_id} - ${category} - ${verifier}${confidence} - ${data.attention_needed ? "attention needed" : "filtered"}`);
+      appendLog(`[classify] ${data.cve_id} - ${category} - ${verifier}${confidence} - ${recordNeedsAttention(data) ? "attention needed" : "fixed"}`);
     } else {
       appendLog(`[error] ${data.cve_id} - ${category} - ${verifier}${confidence} - ${data.message}`);
     }
@@ -730,7 +746,7 @@ async function openReport(id) {
   const report = await api(`/api/reports/${id}`);
   const summary = report.cve_summary || { all_cves: [], needs_attention: [], parse_errors: [] };
   const reviewedTotal = summary.reviewed_total ?? summary.all_cves?.length ?? 0;
-  const reportCves = sortCvesBySeverity(summary.needs_attention || summary.all_cves || []);
+  const reportCves = sortCvesBySeverity((summary.needs_attention || summary.all_cves || []).filter(recordNeedsAttention));
   const attentionRequiredCount = reportCves.length;
   const noActionRequiredCount = Math.max(0, reviewedTotal - attentionRequiredCount);
   const topSeverity = highestSeverity(reportCves);
@@ -816,11 +832,11 @@ function reportServiceCard(item, lookup) {
 }
 
 function reportServiceCveRow(cveId, cve) {
-  const included = Boolean(cve);
+  const included = recordNeedsAttention(cve);
   const attention = cve?.attention || {};
-  const status = attention.status_category || (included ? "attention_required" : "not_required");
+  const status = attention.status_category || (included ? "attention_required" : "fixed");
   const pillClass = included ? "status-attention" : "status-filtered";
-  const label = included ? "Attention required" : "Not required";
+  const label = included ? "Attention required" : "Fixed";
   return `
     <div class="service-cve-row">
       <span class="cve-id">${escapeHtml(cveId)}</span>

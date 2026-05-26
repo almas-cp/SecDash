@@ -1314,6 +1314,22 @@ def count_status_labels(statuses: list[Any]) -> dict[str, int]:
     return counts
 
 
+NO_ATTENTION_STATUS_CATEGORIES = {"fixed", "released", "not_affected", "not_found", "not_listed", "dne", "ignored"}
+
+
+def normalize_status_category(value: Any) -> str:
+    return str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def status_category_requires_attention(value: Any) -> bool | None:
+    category = normalize_status_category(value)
+    if category in NO_ATTENTION_STATUS_CATEGORIES:
+        return False
+    if category in {"affected", "deferred", "unknown", "needed", "needs_triage", "vulnerable"}:
+        return True
+    return None
+
+
 def rhel_major(os_version: str) -> str:
     return os_version.split(".", 1)[0]
 
@@ -1588,16 +1604,31 @@ async def classify_cve_attention(
         cve["attention"] = fallback
         return fallback
 
+    status_category = normalize_status_category(ai.get("status_category") or fallback["status_category"])
+    category_attention = status_category_requires_attention(status_category)
+    attention_needed = bool(ai.get("attention_needed"))
+    if category_attention is not None and attention_needed != category_attention:
+        logger.warning(
+            "Groq CVE classifier normalized inconsistent status | cve=%s ai_attention=%s ai_category=%s normalized_attention=%s",
+            cve.get("cve_id"),
+            attention_needed,
+            status_category,
+            category_attention,
+        )
+        attention_needed = category_attention
+
     result = {
         "provider": "groq",
         "model": GROQ_MODEL,
-        "attention_needed": bool(ai.get("attention_needed")),
-        "status_category": ai.get("status_category") or fallback["status_category"],
+        "attention_needed": attention_needed,
+        "status_category": status_category,
         "status_summary": evidence.get("status_summary") or {},
         "target_status_summary": evidence.get("target_status_summary") or {},
         "confidence": ai.get("confidence") or "low",
         "reason": clean_text(ai.get("reason")) or fallback["reason"],
-        "recommended_action": clean_text(ai.get("recommended_action")) or fallback["recommended_action"],
+        "recommended_action": (clean_text(ai.get("recommended_action")) or fallback["recommended_action"])
+        if attention_needed
+        else "No report action required.",
     }
     cve["attention"] = result
     if result["recommended_action"]:
@@ -2243,7 +2274,12 @@ async def parse_workspace(
                     )
                     await asyncio.sleep(CVE_REQUEST_DELAY_SECONDS)
 
-        needs_attention = [item for item in all_cves if (item.get("attention") or {}).get("attention_needed") is True]
+        needs_attention = [
+            item
+            for item in all_cves
+            if (item.get("attention") or {}).get("attention_needed") is True
+            and status_category_requires_attention((item.get("attention") or {}).get("status_category")) is not False
+        ]
         filtered_out = [
             {
                 "cve_id": item.get("cve_id"),
@@ -2253,7 +2289,7 @@ async def parse_workspace(
                 "attention": item.get("attention"),
             }
             for item in all_cves
-            if (item.get("attention") or {}).get("attention_needed") is not True
+            if item not in needs_attention
         ]
         summary = {
             "all_cves": needs_attention,
