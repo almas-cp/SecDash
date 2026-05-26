@@ -870,6 +870,52 @@ function sourceDetails(item) {
   return parts.join(" | ");
 }
 
+function officialLinks(item) {
+  const links = Array.isArray(item.official_links) ? item.official_links : [];
+  const generated = [];
+  const cveId = item.cve_id;
+  const osName = String(item.source_os || "").toLowerCase();
+  if (cveId && osName === "rhel") {
+    generated.push({ label: "Red Hat CVE", url: `https://access.redhat.com/security/cve/${cveId}` });
+    if (item.source_url) generated.push({ label: "Red Hat API", url: item.source_url });
+    (item.advisories || []).slice(0, 4).forEach((advisory) => {
+      generated.push({ label: advisory, url: `https://access.redhat.com/errata/${advisory}` });
+    });
+  }
+  if (cveId && osName === "ubuntu") {
+    generated.push({ label: "Ubuntu CVE", url: `https://ubuntu.com/security/${cveId}` });
+    if (item.source_url) generated.push({ label: "Ubuntu API", url: item.source_url });
+    (item.notices_ids || []).slice(0, 4).forEach((noticeId) => {
+      generated.push({ label: noticeId, url: `https://ubuntu.com/security/notices/${noticeId}` });
+    });
+  }
+  const seen = new Set();
+  return [...links, ...generated]
+    .filter((link) => link?.label && link?.url && !seen.has(link.url) && seen.add(link.url))
+    .slice(0, 6);
+}
+
+function officialLinksSection(item) {
+  const links = officialLinks(item);
+  if (!links.length) return "";
+  return `
+    <section class="official-links-section">
+      <p class="field-label">Official Links</p>
+      <div class="official-link-list">
+        ${links
+          .map(
+            (link) => `
+              <a class="official-link" href="${escapeHtml(link.url)}" target="_blank" rel="noopener noreferrer">
+                ${escapeHtml(link.label)}
+              </a>
+            `,
+          )
+          .join("")}
+      </div>
+    </section>
+  `;
+}
+
 function cveCard(item) {
   const status = item.status || previewList(item.advisories || []) || item.api_status || "";
   const affected = affectedPreview(item);
@@ -917,6 +963,7 @@ function cveCard(item) {
           <p class="field-text">${escapeHtml(item.remediation || "No remediation guidance available.")}</p>
           ${attention.reason ? `<p class="field-hint">${escapeHtml(attention.reason)}</p>` : ""}
         </section>
+        ${officialLinksSection(item)}
       </div>
     </article>
   `;

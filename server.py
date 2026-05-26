@@ -352,6 +352,84 @@ def clean_port(value: Any) -> str | None:
     return str(port)
 
 
+def parse_port_proto(value: Any) -> tuple[str | None, str | None, str]:
+    text = str(value or "").strip()
+    if not text:
+        return None, None, ""
+
+    slash_match = re.search(r"\b(?P<port>\d{1,5})\s*/\s*(?P<proto>tcp|udp)\b", text, re.IGNORECASE)
+    if slash_match:
+        return clean_port(slash_match.group("port")), slash_match.group("proto").lower(), text[slash_match.end() :].strip(" ,")
+
+    csv_match = re.match(r"\s*(?P<port>\d{1,5})\s*,\s*(?P<proto>tcp|udp)\s*,?\s*(?P<rest>.*)", text, re.IGNORECASE | re.DOTALL)
+    if csv_match:
+        return clean_port(csv_match.group("port")), csv_match.group("proto").lower(), csv_match.group("rest").strip()
+
+    if re.fullmatch(r"\d{1,5}", text):
+        return clean_port(text), None, ""
+    return None, None, text
+
+
+def cpe_parts(cpe: Any) -> dict[str, str]:
+    text = str(cpe or "").strip()
+    if not text.startswith("cpe:"):
+        return {}
+    if text.startswith("cpe:/"):
+        parts = text[5:].split(":")
+        return {
+            "part": parts[0] if len(parts) > 0 else "",
+            "vendor": parts[1] if len(parts) > 1 else "",
+            "product": parts[2] if len(parts) > 2 else "",
+            "version": parts[3] if len(parts) > 3 else "",
+        }
+    if text.startswith("cpe:2.3:"):
+        parts = text.split(":")
+        return {
+            "part": parts[2] if len(parts) > 2 else "",
+            "vendor": parts[3] if len(parts) > 3 else "",
+            "product": parts[4] if len(parts) > 4 else "",
+            "version": parts[5] if len(parts) > 5 else "",
+        }
+    return {}
+
+
+def cpe_product_label(cpe: Any) -> tuple[str, str]:
+    parts = cpe_parts(cpe)
+    vendor = parts.get("vendor", "").lower()
+    product = parts.get("product", "").lower()
+    version = parts.get("version", "")
+    known = {
+        ("apache", "http_server"): "Apache httpd",
+        ("openbsd", "openssh"): "OpenSSH",
+        ("ietf", "secure_shell_protocol"): "SSH protocol",
+        ("php", "php"): "PHP",
+        ("jquery", "jquery"): "jQuery",
+        ("osticket", "osticket"): "osTicket",
+    }
+    label = known.get((vendor, product))
+    if not label and product:
+        label = product.replace("_", " ").replace("-", " ").strip().title()
+    return label or "", "" if version in {"", "-", "*"} else version
+
+
+def service_from_cpe(cpe: Any, location: Any = None) -> tuple[str | None, str | None]:
+    port, proto, _ = parse_port_proto(location)
+    text = str(cpe or "").lower()
+    if not port:
+        if any(token in text for token in ("openbsd:openssh", "secure_shell_protocol", "openssh")):
+            port = "22"
+        elif any(token in text for token in ("apache:http_server", "php:php", "jquery:jquery", "osticket:osticket", "http_server")):
+            port = "80"
+    return port, proto
+
+
+def service_extra(value: Any, limit: int = 220) -> str:
+    text = clean_text(value) or ""
+    if len(text) <= limit:
+        return text
+    return f"{text[: limit - 3].rstrip()}..."
+
+
 def service_label(port: Any = None, service: Any = None) -> str:
     cleaned = str(service or "").strip()
     if cleaned:
@@ -478,29 +556,21 @@ def parse_jsonish_values(text: str) -> list[Any]:
 
 def service_hints_from_cpes(cpes: list[str], cves: list[str], path: Path) -> list[dict[str, Any]]:
     hints: list[dict[str, Any]] = []
-    joined = " ".join(cpes).lower()
-    if any(token in joined for token in ("apache:http_server", "apache_http_server", "apache:httpd", "apache http")):
+    for cpe in cpes:
+        port, proto = service_from_cpe(cpe)
+        if not port:
+            continue
+        product, version = cpe_product_label(cpe)
         add_service(
             hints,
-            port="80",
-            proto="tcp",
+            port=port,
+            proto=proto or "tcp",
             state="open",
-            service="http",
-            product="Apache httpd",
+            service=service_label(port),
+            product=product,
+            version=version,
             source=path.name,
-            cpes=cpes,
-            cves=cves,
-        )
-    if any(token in joined for token in ("openbsd:openssh", "openssh")):
-        add_service(
-            hints,
-            port="22",
-            proto="tcp",
-            state="open",
-            service="ssh",
-            product="OpenSSH",
-            source=path.name,
-            cpes=cpes,
+            cpes=[cpe],
             cves=cves,
         )
     return hints
@@ -512,12 +582,44 @@ def collect_cpes(value: Any) -> list[str]:
         criteria = value.get("criteria")
         if isinstance(criteria, str) and criteria.startswith("cpe:"):
             result.append(criteria)
+        for key, item in value.items():
+            if isinstance(key, str) and key.startswith("cpe:"):
+                result.append(key)
+            if isinstance(item, str) and item.startswith("cpe:"):
+                result.append(item)
         for item in value.values():
             result.extend(collect_cpes(item))
     elif isinstance(value, list):
         for item in value:
             result.extend(collect_cpes(item))
+    elif isinstance(value, str) and value.startswith("cpe:"):
+        result.append(value)
     return sorted(set(result))
+
+
+def collect_xml_cpes(element: ET.Element) -> list[str]:
+    raw = ET.tostring(element, encoding="unicode", method="xml")
+    cpes = re.findall(r"cpe:(?:/|2\.3:)[^\s<>'\"]+", raw, re.IGNORECASE)
+    return sorted({cpe.rstrip(".,;|") for cpe in cpes})
+
+
+def openvas_detail_source(detail: ET.Element) -> str:
+    source = child_by_name(detail, "source")
+    if source is None:
+        return ""
+    return child_text(source, "description") or child_text(source, "name") or ""
+
+
+def openvas_detection_details(result: ET.Element) -> dict[str, str]:
+    details: dict[str, str] = {}
+    for detail in result.iter():
+        if xml_name(detail) != "detail":
+            continue
+        name = child_text(detail, "name")
+        value = child_text(detail, "value")
+        if name and value:
+            details[name.lower()] = value
+    return details
 
 
 def parse_json_scan_summary(path: Path, text: str) -> dict[str, Any]:
@@ -532,8 +634,12 @@ def parse_json_scan_summary(path: Path, text: str) -> dict[str, Any]:
             continue
         item_cves = extract_cves_from_text(json.dumps(item, ensure_ascii=False))
         item_cpes = collect_cpes(item)
-        for hinted in service_hints_from_cpes(item_cpes, item_cves, path):
-            add_service(services, **hinted)
+        has_detected_service_context = any(key in item for key in ("ports", "target", "banner", "service", "services"))
+        if has_detected_service_context:
+            for hinted in service_hints_from_cpes(item_cpes, item_cves, path):
+                add_service(services, **hinted)
+        for key in ("cve", "cve_id", "id"):
+            cves.update(extract_cves_from_text(item.get(key, "")))
         ip = item.get("ip") or item.get("host") or item.get("target")
         for port_item in as_list(item.get("ports")):
             if not isinstance(port_item, dict):
@@ -589,7 +695,8 @@ def parse_xml_scan_summary(path: Path, text: str) -> dict[str, Any]:
             continue
         port_cves = extract_cves_from_text(ET.tostring(port, encoding="unicode", method="xml"))
         port_id = port.attrib.get("portid") or (port.text or "").strip()
-        proto = port.attrib.get("protocol") or "tcp"
+        parsed_port, parsed_proto, _ = parse_port_proto(port_id)
+        proto = port.attrib.get("protocol") or parsed_proto or "tcp"
         state_node = child_by_name(port, "state")
         state = state_node.attrib.get("state") if state_node is not None else "open"
         service_node = child_by_name(port, "service")
@@ -597,12 +704,10 @@ def parse_xml_scan_summary(path: Path, text: str) -> dict[str, Any]:
         product = service_node.attrib.get("product") if service_node is not None else None
         version = service_node.attrib.get("version") if service_node is not None else None
         extra = service_node.attrib.get("extrainfo") if service_node is not None else None
-        cpes = []
-        if service_node is not None:
-            cpes = [("".join(cpe.itertext()).strip()) for cpe in service_node if xml_name(cpe) == "cpe"]
+        cpes = collect_xml_cpes(service_node) if service_node is not None else []
         add_service(
             services,
-            port=port_id,
+            port=parsed_port or port_id,
             proto=proto,
             state=state,
             service=service,
@@ -612,6 +717,50 @@ def parse_xml_scan_summary(path: Path, text: str) -> dict[str, Any]:
             source=path.name,
             cpes=[cpe for cpe in cpes if cpe],
             cves=port_cves,
+        )
+
+    for detail in root.iter():
+        if xml_name(detail) != "detail":
+            continue
+        name = child_text(detail, "name") or ""
+        value = child_text(detail, "value") or ""
+        source = openvas_detail_source(detail)
+        name_lower = name.lower()
+        if name_lower == "services":
+            port, proto, rest = parse_port_proto(value)
+            parts = [part.strip() for part in rest.split(",", 1)]
+            detected_service = parts[0] if parts and parts[0] else None
+            extra = parts[1] if len(parts) > 1 else source
+            add_service(
+                services,
+                port=port,
+                proto=proto or "tcp",
+                state="open",
+                service=detected_service,
+                extra=service_extra(extra or source),
+                source=path.name,
+            )
+            continue
+
+        cpe = value if value.startswith("cpe:") else name if name.startswith("cpe:") else ""
+        if not cpe:
+            continue
+        location = value if name.startswith("cpe:") else None
+        port, proto = service_from_cpe(cpe, location)
+        if not port:
+            continue
+        product, version = cpe_product_label(cpe)
+        add_service(
+            services,
+            port=port,
+            proto=proto or "tcp",
+            state="open",
+            service=service_label(port),
+            product=product,
+            version=version,
+            extra=service_extra(source),
+            source=path.name,
+            cpes=[cpe],
         )
 
     for detail in root.iter():
@@ -634,14 +783,25 @@ def parse_xml_scan_summary(path: Path, text: str) -> dict[str, Any]:
         port_value = child_text(result, "port")
         if port_value:
             result_cves = extract_cves_from_text(ET.tostring(result, encoding="unicode", method="xml"))
+            result_cpes = collect_xml_cpes(result)
+            detection = openvas_detection_details(result)
+            cpe = detection.get("product") if str(detection.get("product", "")).startswith("cpe:") else (result_cpes[0] if result_cpes else "")
+            product, version = cpe_product_label(cpe)
+            port, proto, _ = parse_port_proto(detection.get("location") or port_value)
+            nvt = child_by_name(result, "nvt")
+            nvt_name = child_text(nvt, "name") if nvt is not None else child_text(result, "name")
             add_service(
                 services,
-                port=port_value,
-                proto="udp" if "/udp" in port_value.lower() else "tcp",
+                port=port or port_value,
+                proto=proto or ("udp" if "/udp" in port_value.lower() else "tcp"),
                 state="open",
-                service=None,
+                service=service_label(port or port_value),
+                product=product,
+                version=version,
+                extra=service_extra(nvt_name),
                 ip=child_text(result, "host"),
                 source=path.name,
+                cpes=result_cpes,
                 cves=result_cves,
             )
 
@@ -843,6 +1003,39 @@ def split_references(values: Any) -> list[str]:
     return unique_clean(refs)
 
 
+def dedupe_links(links: list[dict[str, str]]) -> list[dict[str, str]]:
+    seen = set()
+    result = []
+    for link in links:
+        url = link.get("url")
+        label = link.get("label")
+        if not url or not label or url in seen:
+            continue
+        seen.add(url)
+        result.append({"label": label, "url": url})
+    return result
+
+
+def official_rhel_links(cve_id: str, api_url: str, advisories: list[str]) -> list[dict[str, str]]:
+    links = [
+        {"label": "Red Hat CVE", "url": f"https://access.redhat.com/security/cve/{cve_id}"},
+        {"label": "Red Hat API", "url": api_url},
+    ]
+    for advisory in advisories[:4]:
+        links.append({"label": advisory, "url": f"https://access.redhat.com/errata/{advisory}"})
+    return dedupe_links(links)
+
+
+def official_ubuntu_links(cve_id: str, api_url: str, notice_ids: list[str]) -> list[dict[str, str]]:
+    links = [
+        {"label": "Ubuntu CVE", "url": f"https://ubuntu.com/security/{cve_id}"},
+        {"label": "Ubuntu API", "url": api_url},
+    ]
+    for notice_id in notice_ids[:4]:
+        links.append({"label": notice_id, "url": f"https://ubuntu.com/security/notices/{notice_id}"})
+    return dedupe_links(links)
+
+
 def ubuntu_package_statuses(packages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, int]]:
     package_summaries = []
     release_statuses = []
@@ -957,6 +1150,7 @@ def normalize_rhel_cve(data: dict[str, Any], cve_id: str, api_name: str, url: st
         "updated_at": None,
         "cwe": data.get("cwe"),
         "references": split_references(data.get("references")),
+        "official_links": official_rhel_links(data.get("name") or cve_id, url, advisories),
         "advisories": advisories,
         "affected_releases": affected_releases,
         "affected_packages": affected_packages,
@@ -983,6 +1177,7 @@ def normalize_ubuntu_cve(data: dict[str, Any], cve_id: str, api_name: str, url: 
     package_summaries, release_statuses, status_counts = ubuntu_package_statuses(packages)
     notices = [item for item in as_list(data.get("notices")) if isinstance(item, dict)]
     notice_summaries = ubuntu_notice_summary(notices)
+    notice_ids = unique_clean(data.get("notices_ids") or [notice.get("id") for notice in notices])
     patches = as_dict(data.get("patches"))
     patch_links = []
     for package_name, values in patches.items():
@@ -1018,9 +1213,10 @@ def normalize_ubuntu_cve(data: dict[str, Any], cve_id: str, api_name: str, url: 
         "published_at": data.get("published"),
         "updated_at": data.get("updated_at"),
         "references": split_references(data.get("references")),
+        "official_links": official_ubuntu_links(data.get("id") or cve_id, url, notice_ids),
         "bugs": unique_clean(data.get("bugs") or []),
         "notices": notice_summaries,
-        "notices_ids": unique_clean(data.get("notices_ids") or []),
+        "notices_ids": notice_ids,
         "packages": package_summaries,
         "package_statuses": release_statuses,
         "package_status_counts": status_counts,
@@ -1049,6 +1245,11 @@ def build_failed_cve_record(
     api_name = exc.api_name if isinstance(exc, CveApiError) else None
     url = exc.url if isinstance(exc, CveApiError) else None
     body_preview = exc.body_preview if isinstance(exc, CveApiError) else None
+    official_links = (
+        official_ubuntu_links(cve_id, url or f"https://ubuntu.com/security/cves/{cve_id}.json", [])
+        if os_name == "ubuntu"
+        else official_rhel_links(cve_id, url or f"https://access.redhat.com/hydra/rest/securitydata/cve/{cve_id}.json", [])
+    )
     return {
         "cve_id": cve_id,
         "source_os": os_name,
@@ -1067,6 +1268,7 @@ def build_failed_cve_record(
         "remediation": None,
         "ai_summary": None,
         "references": [],
+        "official_links": official_links,
         "advisories": [],
         "affected_releases": [],
         "affected_packages": [],

@@ -1078,6 +1078,38 @@ details.report-section > summary {
   overflow-wrap: anywhere;
 }
 
+.official-links-section {
+  grid-column: 1 / -1;
+}
+
+.official-link-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.official-link {
+  border: 1px solid #bfd0e8;
+  border-radius: 999px;
+  background: #f7fbff;
+  color: #0b5fcc;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+  padding: 8px 10px;
+  text-decoration: none;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease;
+}
+
+.official-link:hover {
+  border-color: #0f6eea;
+  background: #eaf3ff;
+  color: #084aa3;
+}
+
 .empty-state {
   border: 1px dashed #9fb5d5;
   border-radius: 8px;
