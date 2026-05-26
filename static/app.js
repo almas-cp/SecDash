@@ -201,6 +201,26 @@ function serviceRiskBadges(stats) {
   `;
 }
 
+function reportClassifierLabel(classifier) {
+  if (classifier === "groq") return "Groq verified";
+  if (classifier === "fallback") return "Fallback classifier";
+  return classifier || "Unknown";
+}
+
+function highestSeverity(cves) {
+  return sortCvesBySeverity(cves)[0]?.severity || "UNKNOWN";
+}
+
+function severityBreakdown(report) {
+  return `
+    <span class="count-pill severity-critical">Critical ${report.cve_count_critical || 0}</span>
+    <span class="count-pill severity-high">High ${report.cve_count_high || 0}</span>
+    <span class="count-pill severity-medium">Medium ${report.cve_count_medium || 0}</span>
+    <span class="count-pill severity-low">Low ${report.cve_count_low || 0}</span>
+    <span class="count-pill severity-unknown">Unknown ${report.cve_count_unknown || 0}</span>
+  `;
+}
+
 function countPills(row) {
   return `
     <span class="count-pill severity-critical">C ${row.cve_count_critical || 0}</span>
@@ -712,7 +732,10 @@ async function openReport(id) {
   const reviewedTotal = summary.reviewed_total ?? summary.all_cves?.length ?? 0;
   const reportCves = sortCvesBySeverity(summary.needs_attention || summary.all_cves || []);
   const attentionRequiredCount = reportCves.length;
+  const noActionRequiredCount = Math.max(0, reviewedTotal - attentionRequiredCount);
+  const topSeverity = highestSeverity(reportCves);
   const services = summary.services || [];
+  const uniquePorts = new Set(services.map((item) => `${item.port}/${item.proto || "tcp"}`)).size;
   showModal(`
     <div class="panel-header">
       <div>
@@ -721,19 +744,20 @@ async function openReport(id) {
       </div>
       <button class="ghost-button" type="button" data-close-modal>Close</button>
     </div>
-    <div class="meta-grid">
-      <div class="metric-card"><p class="muted">IP</p><strong class="mono">${escapeHtml(report.ip)}</strong></div>
-      <div class="metric-card"><p class="muted">OS</p><strong>${escapeHtml(report.os)} ${escapeHtml(report.os_version)}</strong></div>
-      <div class="metric-card"><p class="muted">Version</p><strong>v${report.version}</strong></div>
-      <div class="metric-card"><p class="muted">Saved By</p><strong>${escapeHtml(report.saved_by_username || "Unknown")}</strong></div>
+    <div class="report-summary-grid">
+      <div class="report-metric-card primary"><p>Attention Required</p><strong>${attentionRequiredCount}</strong></div>
+      <div class="report-metric-card"><p>Reviewed</p><strong>${reviewedTotal}</strong></div>
+      <div class="report-metric-card"><p>No Action Required</p><strong>${noActionRequiredCount}</strong></div>
+      <div class="report-metric-card"><p>Highest Severity</p><strong>${severityBadge(topSeverity)}</strong></div>
     </div>
-    <div class="meta-grid">
-      <div class="metric-card"><p class="muted">Reviewed</p><strong>${reviewedTotal}</strong></div>
-      <div class="metric-card"><p class="muted">Attention Required</p><strong>${attentionRequiredCount}</strong></div>
-      <div class="metric-card"><p class="muted">Classifier</p><strong>${escapeHtml(summary.classifier || "unknown")}</strong></div>
-      <div class="metric-card"><p class="muted">Policy</p><strong>${escapeHtml(summary.report_policy || "attention only")}</strong></div>
+    <div class="report-context-grid">
+      <div><p class="muted">Target</p><strong class="mono">${escapeHtml(report.ip)}</strong><span>${escapeHtml(report.os)} ${escapeHtml(report.os_version)}</span></div>
+      <div><p class="muted">Services</p><strong>${services.length}</strong><span>${uniquePorts} unique ports</span></div>
+      <div><p class="muted">Classifier</p><strong>${escapeHtml(reportClassifierLabel(summary.classifier))}</strong><span>${summary.ai_cross_verification ? "AI cross-check enabled" : "AI cross-check not used"}</span></div>
+      <div><p class="muted">Saved</p><strong>${escapeHtml(report.saved_by_username || "Unknown")}</strong><span>v${report.version} | ${escapeHtml(report.saved_at)}</span></div>
     </div>
-    <div class="button-row">${countPills(report)}<span class="count-pill severity-unknown">U ${report.cve_count_unknown || 0}</span></div>
+    <div class="report-severity-row">${severityBreakdown(report)}</div>
+    <p class="report-policy-note">${escapeHtml(summary.report_policy || "attention only")}</p>
     <div class="report-tabs" role="tablist">
       <button class="report-tab active" type="button" data-report-tab="cves">CVEs</button>
       <button class="report-tab" type="button" data-report-tab="services">Ports / Services</button>

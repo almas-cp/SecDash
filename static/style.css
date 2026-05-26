@@ -649,6 +649,76 @@ h3 {
   margin-top: 14px;
 }
 
+.report-summary-grid {
+  display: grid;
+  grid-template-columns: 1.2fr 1fr 1fr 1fr;
+  gap: 12px;
+}
+
+.report-metric-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 14px 16px;
+}
+
+.report-metric-card.primary {
+  border-color: #f5a6bb;
+  background: #fff5f8;
+}
+
+.report-metric-card p,
+.report-context-grid p {
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.report-metric-card strong {
+  display: block;
+  font-size: 28px;
+  line-height: 1.1;
+}
+
+.report-metric-card .severity-badge {
+  font-size: 13px;
+}
+
+.report-context-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.report-context-grid > div {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 12px 14px;
+}
+
+.report-context-grid strong,
+.report-context-grid span {
+  display: block;
+}
+
+.report-context-grid span {
+  color: #40516e;
+  font-size: 13px;
+  line-height: 1.45;
+  margin-top: 4px;
+}
+
+.report-severity-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.report-policy-note {
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .report-tab {
   border: 0;
   border-bottom: 3px solid transparent;
@@ -1037,6 +1107,8 @@ details.report-section > summary {
 
   .metric-grid,
   .meta-grid,
+  .report-summary-grid,
+  .report-context-grid,
   .filter-bar,
   .inline-form {
     grid-template-columns: 1fr;
