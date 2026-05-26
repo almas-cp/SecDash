@@ -634,6 +634,36 @@ h3 {
   font-size: 13px;
 }
 
+.report-tabs {
+  display: flex;
+  gap: 8px;
+  border-bottom: 1px solid var(--border);
+  margin-top: 14px;
+}
+
+.report-tab {
+  border: 0;
+  border-bottom: 3px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-weight: 800;
+  padding: 10px 12px;
+}
+
+.report-tab.active {
+  border-bottom-color: var(--accent);
+  color: #122343;
+}
+
+.report-tab-panel {
+  display: none;
+}
+
+.report-tab-panel.active {
+  display: block;
+}
+
 .mono,
 .live-log,
 .cve-id {

@@ -641,7 +641,9 @@ async function openReport(id) {
   const report = await api(`/api/reports/${id}`);
   const summary = report.cve_summary || { all_cves: [], needs_attention: [], parse_errors: [] };
   const reviewedTotal = summary.reviewed_total ?? summary.all_cves?.length ?? 0;
-  const filteredOut = summary.filtered_out_count ?? 0;
+  const fixedCount = summary.filtered_out_count ?? 0;
+  const reportCves = summary.needs_attention || summary.all_cves || [];
+  const services = summary.services || [];
   showModal(`
     <div class="panel-header">
       <div>
@@ -658,13 +660,85 @@ async function openReport(id) {
     </div>
     <div class="meta-grid">
       <div class="metric-card"><p class="muted">Reviewed</p><strong>${reviewedTotal}</strong></div>
-      <div class="metric-card"><p class="muted">Filtered Out</p><strong>${filteredOut}</strong></div>
+      <div class="metric-card"><p class="muted">Fixed</p><strong>${fixedCount}</strong></div>
       <div class="metric-card"><p class="muted">Classifier</p><strong>${escapeHtml(summary.classifier || "unknown")}</strong></div>
       <div class="metric-card"><p class="muted">Policy</p><strong>${escapeHtml(summary.report_policy || "attention only")}</strong></div>
     </div>
     <div class="button-row">${countPills(report)}<span class="count-pill severity-unknown">U ${report.cve_count_unknown || 0}</span></div>
-    ${cveTable("Attention Required", summary.needs_attention || summary.all_cves || [])}
+    <div class="report-tabs" role="tablist">
+      <button class="report-tab active" type="button" data-report-tab="cves">CVEs</button>
+      <button class="report-tab" type="button" data-report-tab="services">Ports / Services</button>
+    </div>
+    <div class="report-tab-panel active" data-report-panel="cves">
+      ${cveTable("Attention Required", reportCves)}
+    </div>
+    <div class="report-tab-panel" data-report-panel="services">
+      ${reportServicesSection(services, reportCves)}
+    </div>
   `, "large");
+}
+
+function cveLookup(cves) {
+  return Object.fromEntries((cves || []).map((item) => [item.cve_id, item]));
+}
+
+function reportServicesSection(services, reportCves) {
+  const lookup = cveLookup(reportCves);
+  return `
+    <div class="report-section">
+      <h3>Ports / Services</h3>
+      <div class="service-list">
+        ${services.length ? services.map((service) => reportServiceCard(service, lookup)).join("") : `<div class="empty-state">No ports or services were saved with this report.</div>`}
+      </div>
+    </div>
+  `;
+}
+
+function reportServiceCard(item, lookup) {
+  const endpoint = `${escapeHtml(item.port)}/${escapeHtml(item.proto || "tcp")}`;
+  const state = escapeHtml(item.state || "unknown");
+  const service = escapeHtml(serviceName(item));
+  const extra = item.extra ? `<span class="service-extra">${escapeHtml(item.extra)}</span>` : "";
+  const cves = item.cves || [];
+  return `
+    <details class="service-row">
+      <summary class="service-summary">
+        <div class="service-port">
+          <span class="service-endpoint">${endpoint}</span>
+          <span class="service-state">${state}</span>
+        </div>
+        <div class="service-details">
+          <strong>${service}</strong>
+          ${extra}
+          <span class="detected-cve-files">${escapeHtml((item.files || []).join(", "))}</span>
+        </div>
+        <span class="service-cve-count">${cves.length ? `${cves.length} CVEs` : "No CVEs linked"}</span>
+      </summary>
+      <div class="service-cve-list">
+        ${cves.length ? cves.map((cveId) => reportServiceCveRow(cveId, lookup[cveId])).join("") : `<div class="empty-state">No CVEs linked to this service.</div>`}
+      </div>
+    </details>
+  `;
+}
+
+function reportServiceCveRow(cveId, cve) {
+  const included = Boolean(cve);
+  const attention = cve?.attention || {};
+  const status = attention.status_category || (included ? "attention_needed" : "fixed");
+  const pillClass = included ? "status-attention" : "status-filtered";
+  const label = included ? "In report" : "Fixed";
+  return `
+    <div class="service-cve-row">
+      <span class="cve-id">${escapeHtml(cveId)}</span>
+      <span class="cve-live-pill ${pillClass}">${label}</span>
+      <span class="service-cve-note">${escapeHtml(status)}</span>
+    </div>
+  `;
+}
+
+function switchReportTab(tabName) {
+  $$(".report-tab").forEach((button) => button.classList.toggle("active", button.dataset.reportTab === tabName));
+  $$("[data-report-panel]").forEach((panel) => panel.classList.toggle("active", panel.dataset.reportPanel === tabName));
 }
 
 function previewList(values, limit = 3) {
@@ -835,6 +909,7 @@ document.addEventListener("click", async (event) => {
   if (!target) return;
 
   if (target.matches("[data-close-modal]")) closeModal();
+  if (target.matches("[data-report-tab]")) switchReportTab(target.dataset.reportTab);
   if (target.matches(".nav-button")) {
     const view = target.dataset.view;
     setView(view);

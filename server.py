@@ -2022,9 +2022,17 @@ async def save_report(
     parsed = PARSE_CACHE.get(workspace_id)
     if not parsed:
         raise api_error(422, "Validation failed", "Run Classify before saving a report")
+    async with db_connect() as db:
+        workspace = await get_workspace_for_researcher(db, workspace_id, user["id"])
+        cursor = await db.execute("SELECT * FROM scan_files WHERE workspace_id = ? ORDER BY uploaded_at ASC", (workspace_id,))
+        files = [dict(row) for row in await cursor.fetchall()]
+
+    scan_summary = await collect_file_cves(workspace_id, files)
     report_summary = {
         "all_cves": parsed.get("needs_attention", []),
         "needs_attention": parsed.get("needs_attention", []),
+        "services": scan_summary.get("services", []),
+        "service_total": scan_summary.get("service_total", 0),
         "parse_errors": parsed.get("parse_errors", []),
         "reviewed_total": parsed.get("reviewed_total", len(parsed.get("all_cves", []))),
         "filtered_out_count": len(parsed.get("filtered_out", [])),
@@ -2035,7 +2043,6 @@ async def save_report(
     counts = severity_counts(report_summary["all_cves"])
 
     async with db_connect() as db:
-        workspace = await get_workspace_for_researcher(db, workspace_id, user["id"])
         cursor = await db.execute("SELECT COALESCE(MAX(version), 0) + 1 AS next_version FROM reports WHERE workspace_id = ?", (workspace_id,))
         version = (await cursor.fetchone())["next_version"]
         cursor = await db.execute(
@@ -2141,9 +2148,17 @@ async def get_report(
             (report_id,),
         )
         row = await cursor.fetchone()
+        files: list[dict[str, Any]] = []
+        if row:
+            cursor = await db.execute("SELECT * FROM scan_files WHERE workspace_id = ? ORDER BY uploaded_at ASC", (row["workspace_id"],))
+            files = [dict(file_row) for file_row in await cursor.fetchall()]
     if not row:
         raise api_error(404, "Not found", "Report not found")
     report = dict(row)
     report["cve_summary"] = json.loads(report["cve_summary"])
+    if "services" not in report["cve_summary"] and files:
+        scan_summary = await collect_file_cves(report["workspace_id"], files)
+        report["cve_summary"]["services"] = scan_summary.get("services", [])
+        report["cve_summary"]["service_total"] = scan_summary.get("service_total", 0)
     return report
 
