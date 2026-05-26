@@ -91,7 +91,7 @@ ENV_FILE_STATUS = load_env_file(ENV_PATH)
 
 SECRET_KEY = os.environ.get("SECDASH_SECRET_KEY", "sec-dash-dev-secret-change-me")
 SESSION_COOKIE = "session_token"
-ALLOWED_UPLOAD_SUFFIXES = {".xml", ".nmap", ".gnmap", ".txt"}
+ALLOWED_UPLOAD_SUFFIXES = {".xml", ".nmap", ".gnmap", ".txt", ".json", ".csv"}
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 CVE_REQUEST_DELAY_SECONDS = float(os.environ.get("CVE_REQUEST_DELAY_SECONDS", "5"))
 GROQ_API_URL = os.environ.get("GROQ_API_URL", "https://api.groq.com/openai/v1/chat/completions")
@@ -443,19 +443,97 @@ def extract_cves_from_text(text: str) -> list[str]:
     return sorted({cve.upper() for cve in CVE_PATTERN.findall(text or "")})
 
 
+def parse_jsonish_values(text: str) -> list[Any]:
+    candidates = [text]
+    repaired = re.sub(r",\s*,+", ",", text)
+    repaired = re.sub(r"\[\s*,", "[", repaired)
+    repaired = re.sub(r",\s*\]", "]", repaired)
+    if repaired != text:
+        candidates.append(repaired)
+
+    for candidate in candidates:
+        try:
+            data = json.loads(candidate)
+            return data if isinstance(data, list) else [data]
+        except json.JSONDecodeError:
+            continue
+
+    decoder = json.JSONDecoder()
+    values: list[Any] = []
+    index = 0
+    while index < len(text):
+        while index < len(text) and text[index] in " \r\n\t,[]":
+            index += 1
+        if index >= len(text):
+            break
+        try:
+            value, next_index = decoder.raw_decode(text, index)
+        except json.JSONDecodeError:
+            index += 1
+            continue
+        values.append(value)
+        index = next_index
+    return values
+
+
+def service_hints_from_cpes(cpes: list[str], cves: list[str], path: Path) -> list[dict[str, Any]]:
+    hints: list[dict[str, Any]] = []
+    joined = " ".join(cpes).lower()
+    if any(token in joined for token in ("apache:http_server", "apache_http_server", "apache:httpd", "apache http")):
+        add_service(
+            hints,
+            port="80",
+            proto="tcp",
+            state="open",
+            service="http",
+            product="Apache httpd",
+            source=path.name,
+            cpes=cpes,
+            cves=cves,
+        )
+    if any(token in joined for token in ("openbsd:openssh", "openssh")):
+        add_service(
+            hints,
+            port="22",
+            proto="tcp",
+            state="open",
+            service="ssh",
+            product="OpenSSH",
+            source=path.name,
+            cpes=cpes,
+            cves=cves,
+        )
+    return hints
+
+
+def collect_cpes(value: Any) -> list[str]:
+    result: list[str] = []
+    if isinstance(value, dict):
+        criteria = value.get("criteria")
+        if isinstance(criteria, str) and criteria.startswith("cpe:"):
+            result.append(criteria)
+        for item in value.values():
+            result.extend(collect_cpes(item))
+    elif isinstance(value, list):
+        for item in value:
+            result.extend(collect_cpes(item))
+    return sorted(set(result))
+
+
 def parse_json_scan_summary(path: Path, text: str) -> dict[str, Any]:
     cves = set(extract_cves_from_text(text))
     services: list[dict[str, Any]] = []
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
+    items = parse_jsonish_values(text)
+    if not items:
         return {"cves": sorted(cves), "services": services}
 
-    items = data if isinstance(data, list) else [data]
     for item in items:
         if not isinstance(item, dict):
             continue
         item_cves = extract_cves_from_text(json.dumps(item, ensure_ascii=False))
+        item_cpes = collect_cpes(item)
+        for hinted in service_hints_from_cpes(item_cpes, item_cves, path):
+            add_service(services, **hinted)
         ip = item.get("ip") or item.get("host") or item.get("target")
         for port_item in as_list(item.get("ports")):
             if not isinstance(port_item, dict):
