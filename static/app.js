@@ -132,6 +132,75 @@ function severityBadge(severity) {
   return `<span class="severity-badge severity-${normalized.toLowerCase()}">${escapeHtml(normalized)}</span>`;
 }
 
+function severitySortValue(severity) {
+  return { CRITICAL: 5, HIGH: 4, MEDIUM: 3, LOW: 2, UNKNOWN: 1 }[String(severity || "UNKNOWN").toUpperCase()] || 0;
+}
+
+function sortCvesBySeverity(cves) {
+  return [...(cves || [])].sort((left, right) => {
+    const severityDelta = severitySortValue(right.severity) - severitySortValue(left.severity);
+    if (severityDelta) return severityDelta;
+    const cvssDelta = Number(right.cvss_score || 0) - Number(left.cvss_score || 0);
+    if (cvssDelta) return cvssDelta;
+    return String(left.cve_id || "").localeCompare(String(right.cve_id || ""));
+  });
+}
+
+function recordSeverity(record) {
+  return String(record?.severity || "UNKNOWN").toUpperCase();
+}
+
+function recordNeedsAttention(record) {
+  return record?.attention_needed === true || record?.attention?.attention_needed === true;
+}
+
+function serviceRiskStats(cveIds, lookup) {
+  const ids = [...(cveIds || [])];
+  const records = ids.map((id) => lookup[id]).filter(Boolean);
+  const highest = records.reduce(
+    (current, record) => (severitySortValue(recordSeverity(record)) > severitySortValue(current) ? recordSeverity(record) : current),
+    "UNKNOWN"
+  );
+  return {
+    total: ids.length,
+    attentionRequired: ids.filter((id) => recordNeedsAttention(lookup[id])).length,
+    highestSeverity: highest,
+  };
+}
+
+function sortCveIdsBySeverity(cveIds, lookup) {
+  return [...(cveIds || [])].sort((left, right) => {
+    const severityDelta = severitySortValue(recordSeverity(lookup[right])) - severitySortValue(recordSeverity(lookup[left]));
+    if (severityDelta) return severityDelta;
+    const attentionDelta = Number(recordNeedsAttention(lookup[right])) - Number(recordNeedsAttention(lookup[left]));
+    if (attentionDelta) return attentionDelta;
+    return String(left).localeCompare(String(right));
+  });
+}
+
+function sortServicesByRisk(services, lookup) {
+  return [...(services || [])].sort((left, right) => {
+    const leftStats = serviceRiskStats(left.cves || [], lookup);
+    const rightStats = serviceRiskStats(right.cves || [], lookup);
+    const severityDelta = severitySortValue(rightStats.highestSeverity) - severitySortValue(leftStats.highestSeverity);
+    if (severityDelta) return severityDelta;
+    const attentionDelta = rightStats.attentionRequired - leftStats.attentionRequired;
+    if (attentionDelta) return attentionDelta;
+    const totalDelta = rightStats.total - leftStats.total;
+    if (totalDelta) return totalDelta;
+    return Number(left.port || 0) - Number(right.port || 0);
+  });
+}
+
+function serviceRiskBadges(stats) {
+  const severity = String(stats.highestSeverity || "UNKNOWN").toUpperCase();
+  return `
+    <span class="service-cve-count">CVEs ${stats.total}</span>
+    <span class="service-cve-count status-attention">Attention ${stats.attentionRequired}</span>
+    <span class="severity-badge severity-${severity.toLowerCase()}">Top ${escapeHtml(severity)}</span>
+  `;
+}
+
 function countPills(row) {
   return `
     <span class="count-pill severity-critical">C ${row.cve_count_critical || 0}</span>
@@ -294,7 +363,7 @@ function serviceName(item) {
 
 function renderServices(items, classifications = {}) {
   $("#service-list").innerHTML = items.length
-    ? items
+    ? sortServicesByRisk(items, classifications)
         .map((item) => {
           const endpoint = `${escapeHtml(item.port)}/${escapeHtml(item.proto || "tcp")}`;
           const state = escapeHtml(item.state || "unknown");
@@ -302,7 +371,7 @@ function renderServices(items, classifications = {}) {
           const extra = item.extra ? `<span class="service-extra">${escapeHtml(item.extra)}</span>` : "";
           const files = (item.files || []).join(", ");
           const cves = item.cves || [];
-          const cveSummary = cves.length ? `${cves.length} CVEs` : "No CVEs linked";
+          const stats = serviceRiskStats(cves, classifications);
           return `
         <details class="service-row">
           <summary class="service-summary">
@@ -315,10 +384,10 @@ function renderServices(items, classifications = {}) {
               ${extra}
               <span class="detected-cve-files">${escapeHtml(files)}</span>
             </div>
-            <span class="service-cve-count">${escapeHtml(cveSummary)}</span>
+            <div class="service-risk-badges">${serviceRiskBadges(stats)}</div>
           </summary>
           <div class="service-cve-list">
-            ${renderServiceCves(cves, classifications)}
+            ${renderServiceCves(sortCveIdsBySeverity(cves, classifications), classifications)}
           </div>
         </details>
       `;
@@ -641,8 +710,8 @@ async function openReport(id) {
   const report = await api(`/api/reports/${id}`);
   const summary = report.cve_summary || { all_cves: [], needs_attention: [], parse_errors: [] };
   const reviewedTotal = summary.reviewed_total ?? summary.all_cves?.length ?? 0;
-  const fixedCount = summary.filtered_out_count ?? 0;
-  const reportCves = summary.needs_attention || summary.all_cves || [];
+  const reportCves = sortCvesBySeverity(summary.needs_attention || summary.all_cves || []);
+  const attentionRequiredCount = reportCves.length;
   const services = summary.services || [];
   showModal(`
     <div class="panel-header">
@@ -660,7 +729,7 @@ async function openReport(id) {
     </div>
     <div class="meta-grid">
       <div class="metric-card"><p class="muted">Reviewed</p><strong>${reviewedTotal}</strong></div>
-      <div class="metric-card"><p class="muted">Fixed</p><strong>${fixedCount}</strong></div>
+      <div class="metric-card"><p class="muted">Attention Required</p><strong>${attentionRequiredCount}</strong></div>
       <div class="metric-card"><p class="muted">Classifier</p><strong>${escapeHtml(summary.classifier || "unknown")}</strong></div>
       <div class="metric-card"><p class="muted">Policy</p><strong>${escapeHtml(summary.report_policy || "attention only")}</strong></div>
     </div>
@@ -688,7 +757,7 @@ function reportServicesSection(services, reportCves) {
     <div class="report-section">
       <h3>Ports / Services</h3>
       <div class="service-list">
-        ${services.length ? services.map((service) => reportServiceCard(service, lookup)).join("") : `<div class="empty-state">No ports or services were saved with this report.</div>`}
+        ${services.length ? sortServicesByRisk(services, lookup).map((service) => reportServiceCard(service, lookup)).join("") : `<div class="empty-state">No ports or services were saved with this report.</div>`}
       </div>
     </div>
   `;
@@ -700,6 +769,7 @@ function reportServiceCard(item, lookup) {
   const service = escapeHtml(serviceName(item));
   const extra = item.extra ? `<span class="service-extra">${escapeHtml(item.extra)}</span>` : "";
   const cves = item.cves || [];
+  const stats = serviceRiskStats(cves, lookup);
   return `
     <details class="service-row">
       <summary class="service-summary">
@@ -712,10 +782,10 @@ function reportServiceCard(item, lookup) {
           ${extra}
           <span class="detected-cve-files">${escapeHtml((item.files || []).join(", "))}</span>
         </div>
-        <span class="service-cve-count">${cves.length ? `${cves.length} CVEs` : "No CVEs linked"}</span>
+        <div class="service-risk-badges">${serviceRiskBadges(stats)}</div>
       </summary>
       <div class="service-cve-list">
-        ${cves.length ? cves.map((cveId) => reportServiceCveRow(cveId, lookup[cveId])).join("") : `<div class="empty-state">No CVEs linked to this service.</div>`}
+        ${cves.length ? sortCveIdsBySeverity(cves, lookup).map((cveId) => reportServiceCveRow(cveId, lookup[cveId])).join("") : `<div class="empty-state">No CVEs linked to this service.</div>`}
       </div>
     </details>
   `;
@@ -724,9 +794,9 @@ function reportServiceCard(item, lookup) {
 function reportServiceCveRow(cveId, cve) {
   const included = Boolean(cve);
   const attention = cve?.attention || {};
-  const status = attention.status_category || (included ? "attention_needed" : "fixed");
+  const status = attention.status_category || (included ? "attention_required" : "not_required");
   const pillClass = included ? "status-attention" : "status-filtered";
-  const label = included ? "In report" : "Fixed";
+  const label = included ? "Attention required" : "Not required";
   return `
     <div class="service-cve-row">
       <span class="cve-id">${escapeHtml(cveId)}</span>

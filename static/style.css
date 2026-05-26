@@ -552,7 +552,6 @@ h3 {
 
 .service-summary::after {
   content: "Show";
-  margin-left: auto;
   color: var(--accent);
   font-size: 12px;
   font-weight: 800;
@@ -607,6 +606,15 @@ h3 {
   padding: 3px 9px;
   font-size: 12px;
   font-weight: 800;
+}
+
+.service-risk-badges {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-left: auto;
 }
 
 .service-cve-list {
