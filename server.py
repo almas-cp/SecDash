@@ -509,6 +509,102 @@ def add_service(
                 break
 
 
+def add_application(
+    applications: list[dict[str, Any]],
+    *,
+    cpe: Any,
+    source: str | None = None,
+    location: Any = None,
+    ip: Any = None,
+    occurrences: int = 1,
+) -> None:
+    cpe_text = str(cpe or "").strip()
+    if not cpe_text.startswith("cpe:"):
+        return
+    product, version = cpe_product_label(cpe_text)
+    location_text = str(location or "").strip()
+    item = {
+        "cpe": cpe_text,
+        "product": product,
+        "version": version,
+        "ip": str(ip or "").strip(),
+        "source": source or "",
+        "locations": [location_text] if location_text else [],
+        "occurrences": max(1, int(occurrences or 1)),
+    }
+    for existing in applications:
+        if existing.get("cpe") != cpe_text:
+            continue
+        existing["locations"] = sorted(set((existing.get("locations") or []) + item["locations"]))
+        existing["occurrences"] = max(existing.get("occurrences") or 1, item["occurrences"])
+        if not existing.get("ip") and item["ip"]:
+            existing["ip"] = item["ip"]
+        return
+    applications.append(item)
+
+
+def add_scan_result(
+    results: list[dict[str, Any]],
+    *,
+    result_id: Any = None,
+    scanner: str,
+    name: Any,
+    severity: Any = None,
+    threat: Any = None,
+    qod: Any = None,
+    host: Any = None,
+    port: Any = None,
+    proto: Any = None,
+    location: Any = None,
+    family: Any = None,
+    description: Any = None,
+    solution: Any = None,
+    cves: list[str] | None = None,
+    cpes: list[str] | None = None,
+    created_at: Any = None,
+    source: str | None = None,
+) -> None:
+    name_text = clean_text(name)
+    if not name_text:
+        return
+    port_text, parsed_proto, _ = parse_port_proto(location or port)
+    item = {
+        "id": str(result_id or "").strip(),
+        "scanner": scanner,
+        "name": name_text,
+        "severity": to_float(severity),
+        "threat": str(threat or "").strip(),
+        "qod": to_float(qod),
+        "host": str(host or "").strip(),
+        "port": port_text or clean_port(port),
+        "proto": str(proto or parsed_proto or "tcp").strip().lower(),
+        "location": str(location or "").strip(),
+        "family": str(family or "").strip(),
+        "description": clean_text(description) or "",
+        "solution": clean_text(solution) or "",
+        "cves": sorted(set(cves or [])),
+        "cpes": sorted(set(cpes or [])),
+        "created_at": str(created_at or "").strip(),
+        "source": source or "",
+    }
+    key = (item["scanner"], item["id"], item["name"], item["host"], item["location"], item["port"])
+    for existing in results:
+        existing_key = (
+            existing.get("scanner"),
+            existing.get("id"),
+            existing.get("name"),
+            existing.get("host"),
+            existing.get("location"),
+            existing.get("port"),
+        )
+        if existing_key != key:
+            continue
+        existing["cves"] = sorted(set((existing.get("cves") or []) + item["cves"]))
+        existing["cpes"] = sorted(set((existing.get("cpes") or []) + item["cpes"]))
+        return
+    results.append(item)
+
+
 def parse_target_port(target: Any) -> tuple[str | None, str | None]:
     text = str(target or "").strip()
     match = re.search(r"(?P<ip>\d{1,3}(?:\.\d{1,3}){3})?(?::(?P<port>\d{1,5}))$", text)
@@ -625,9 +721,11 @@ def openvas_detection_details(result: ET.Element) -> dict[str, str]:
 def parse_json_scan_summary(path: Path, text: str) -> dict[str, Any]:
     cves = set(extract_cves_from_text(text))
     services: list[dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
+    applications: list[dict[str, Any]] = []
     items = parse_jsonish_values(text)
     if not items:
-        return {"cves": sorted(cves), "services": services}
+        return {"cves": sorted(cves), "services": services, "results": results, "applications": applications}
 
     for item in items:
         if not isinstance(item, dict):
@@ -673,22 +771,48 @@ def parse_json_scan_summary(path: Path, text: str) -> dict[str, Any]:
                 source=path.name,
                 cves=item_cves,
             )
+            for index, note in enumerate(as_list(item.get("additional_notes")), start=1):
+                note_text = clean_text(note)
+                if not note_text:
+                    continue
+                add_scan_result(
+                    results,
+                    result_id=f"ssh-audit-{index}",
+                    scanner="ssh-audit",
+                    name="SSH audit finding",
+                    threat="Review",
+                    host=target_ip or ip,
+                    port=target_port,
+                    proto="tcp",
+                    location=f"{target_port}/tcp" if target_port else "",
+                    family="SSH",
+                    description=note_text,
+                    cves=extract_cves_from_text(note_text),
+                    source=path.name,
+                )
         for cve in as_list(item.get("cves")):
             if isinstance(cve, str):
                 cves.update(extract_cves_from_text(cve))
             elif isinstance(cve, dict):
                 cves.update(extract_cves_from_text(json.dumps(cve, ensure_ascii=False)))
 
-    return {"cves": sorted(cves), "services": services}
+    return {"cves": sorted(cves), "services": services, "results": results, "applications": applications}
 
 
 def parse_xml_scan_summary(path: Path, text: str) -> dict[str, Any]:
     cves = set(extract_cves_from_text(text))
     services: list[dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
+    applications: list[dict[str, Any]] = []
     try:
         root = ET.fromstring(text)
     except ET.ParseError:
-        return {"cves": sorted(cves), "services": services}
+        return {"cves": sorted(cves), "services": services, "results": results, "applications": applications}
+
+    first_address = next(
+        (element.attrib.get("addr") for element in root.iter() if xml_name(element) == "address" and element.attrib.get("addr")),
+        "",
+    )
 
     for port in root.iter():
         if xml_name(port) != "port":
@@ -717,6 +841,48 @@ def parse_xml_scan_summary(path: Path, text: str) -> dict[str, Any]:
             source=path.name,
             cpes=[cpe for cpe in cpes if cpe],
             cves=port_cves,
+        )
+        for cpe in cpes:
+            add_application(
+                applications,
+                cpe=cpe,
+                source=path.name,
+                location=f"{parsed_port or clean_port(port_id)}/{proto}",
+                ip=first_address,
+            )
+        for script in port.iter():
+            if xml_name(script) != "script":
+                continue
+            script_output = script.attrib.get("output") or "".join(script.itertext()).strip()
+            add_scan_result(
+                results,
+                result_id=script.attrib.get("id"),
+                scanner="nmap",
+                name=script.attrib.get("id") or "Nmap script finding",
+                host=first_address,
+                port=parsed_port or port_id,
+                proto=proto,
+                location=f"{parsed_port or clean_port(port_id)}/{proto}",
+                family="Nmap NSE",
+                description=script_output,
+                cves=extract_cves_from_text(script_output),
+                cpes=collect_xml_cpes(script),
+                source=path.name,
+            )
+
+    all_details = [detail for detail in root.iter() if xml_name(detail) == "detail"]
+    for detail in all_details:
+        if (child_text(detail, "name") or "").lower() != "app":
+            continue
+        cpe = child_text(detail, "value") or ""
+        occurrences = sum(1 for candidate in all_details if child_text(candidate, "name") == cpe)
+        locations = [child_text(candidate, "value") for candidate in all_details if child_text(candidate, "name") == cpe]
+        add_application(
+            applications,
+            cpe=cpe,
+            source=path.name,
+            location=next((location for location in locations if location), ""),
+            occurrences=occurrences or 1,
         )
 
     for detail in root.iter():
@@ -777,6 +943,31 @@ def parse_xml_scan_summary(path: Path, text: str) -> dict[str, Any]:
                 source=path.name,
             )
 
+    nikto_details = next((element for element in root.iter() if xml_name(element) == "scandetails"), None)
+    if nikto_details is not None:
+        nikto_host = nikto_details.attrib.get("targetip")
+        nikto_port = nikto_details.attrib.get("targetport")
+        for item in root.iter():
+            if xml_name(item) != "item":
+                continue
+            description = child_text(item, "description") or ""
+            uri = child_text(item, "uri") or ""
+            add_scan_result(
+                results,
+                result_id=item.attrib.get("id"),
+                scanner="nikto",
+                name=description or f"Nikto finding {item.attrib.get('id') or ''}".strip(),
+                threat="Review",
+                host=nikto_host,
+                port=nikto_port,
+                proto="tcp",
+                location=uri,
+                family="Web scan",
+                description=description,
+                cves=extract_cves_from_text(ET.tostring(item, encoding="unicode", method="xml")),
+                source=path.name,
+            )
+
     for result in root.iter():
         if xml_name(result) != "result":
             continue
@@ -804,8 +995,28 @@ def parse_xml_scan_summary(path: Path, text: str) -> dict[str, Any]:
                 cpes=result_cpes,
                 cves=result_cves,
             )
+            add_scan_result(
+                results,
+                result_id=result.attrib.get("id"),
+                scanner="openvas",
+                name=nvt_name or child_text(result, "name") or "OpenVAS finding",
+                severity=child_text(result, "severity"),
+                threat=child_text(result, "threat"),
+                qod=child_text(child_by_name(result, "qod"), "value") if child_by_name(result, "qod") is not None else None,
+                host=child_text(result, "host"),
+                port=port or port_value,
+                proto=proto or ("udp" if "/udp" in port_value.lower() else "tcp"),
+                location=port_value,
+                family=child_text(nvt, "family") if nvt is not None else None,
+                description=child_text(result, "description"),
+                solution=child_text(nvt, "solution") if nvt is not None else None,
+                cves=result_cves,
+                cpes=result_cpes,
+                created_at=child_text(result, "creation_time"),
+                source=path.name,
+            )
 
-    return {"cves": sorted(cves), "services": services}
+    return {"cves": sorted(cves), "services": services, "results": results, "applications": applications}
 
 
 def parse_scan_file(filepath: str) -> dict[str, Any]:
@@ -816,7 +1027,7 @@ def parse_scan_file(filepath: str) -> dict[str, Any]:
         return parse_json_scan_summary(path, text)
     if suffix == ".xml":
         return parse_xml_scan_summary(path, text)
-    return {"cves": extract_cves_from_text(text), "services": []}
+    return {"cves": extract_cves_from_text(text), "services": [], "results": [], "applications": []}
 
 
 def parse_nmap_file(filepath: str) -> list[str]:
@@ -854,6 +1065,8 @@ def cached_classification_map(workspace_id: int) -> dict[str, dict[str, Any]]:
 async def collect_file_cves(workspace_id: int, files: list[dict[str, Any]]) -> dict[str, Any]:
     source_map: dict[str, list[str]] = {}
     service_map: dict[tuple[Any, ...], dict[str, Any]] = {}
+    result_map: dict[tuple[Any, ...], dict[str, Any]] = {}
+    application_map: dict[str, dict[str, Any]] = {}
     file_results: list[dict[str, Any]] = []
 
     for item in files:
@@ -874,6 +1087,8 @@ async def collect_file_cves(workspace_id: int, files: list[dict[str, Any]]) -> d
                     "cve_count": 0,
                     "cves": [],
                     "service_count": 0,
+                    "result_count": 0,
+                    "application_count": 0,
                 }
             )
             continue
@@ -881,13 +1096,17 @@ async def collect_file_cves(workspace_id: int, files: list[dict[str, Any]]) -> d
         parsed_summary = await asyncio.to_thread(parse_scan_file, str(absolute))
         parsed = parsed_summary["cves"]
         services = parsed_summary["services"]
+        results = parsed_summary["results"]
+        applications = parsed_summary["applications"]
         logger.info(
-            "Uploaded scan file locally extracted | workspace_id=%s file_id=%s filename=%s cve_count=%s service_count=%s",
+            "Uploaded scan file locally extracted | workspace_id=%s file_id=%s filename=%s cve_count=%s service_count=%s result_count=%s application_count=%s",
             workspace_id,
             item["id"],
             item["filename"],
             len(parsed),
             len(services),
+            len(results),
+            len(applications),
         )
         for cve_id in parsed:
             source_map.setdefault(cve_id, []).append(item["filename"])
@@ -906,6 +1125,27 @@ async def collect_file_cves(workspace_id: int, files: list[dict[str, Any]]) -> d
             existing["cpes"] = sorted(set((existing.get("cpes") or []) + (service.get("cpes") or [])))
             existing["cves"] = sorted(set((existing.get("cves") or []) + (service.get("cves") or [])))
             existing.setdefault("files", []).append(item["filename"])
+        for result in results:
+            key = (
+                result.get("scanner"),
+                result.get("id"),
+                result.get("name"),
+                result.get("host"),
+                result.get("location"),
+                result.get("port"),
+            )
+            existing = result_map.setdefault(key, {**result, "files": []})
+            existing["cves"] = sorted(set((existing.get("cves") or []) + (result.get("cves") or [])))
+            existing["cpes"] = sorted(set((existing.get("cpes") or []) + (result.get("cpes") or [])))
+            existing.setdefault("files", []).append(item["filename"])
+        for application in applications:
+            cpe = application.get("cpe")
+            if not cpe:
+                continue
+            existing = application_map.setdefault(cpe, {**application, "files": []})
+            existing["locations"] = sorted(set((existing.get("locations") or []) + (application.get("locations") or [])))
+            existing["occurrences"] = max(existing.get("occurrences") or 1, application.get("occurrences") or 1)
+            existing.setdefault("files", []).append(item["filename"])
         file_results.append(
             {
                 "id": item["id"],
@@ -914,6 +1154,8 @@ async def collect_file_cves(workspace_id: int, files: list[dict[str, Any]]) -> d
                 "cve_count": len(parsed),
                 "cves": parsed,
                 "service_count": len(services),
+                "result_count": len(results),
+                "application_count": len(applications),
             }
         )
 
@@ -933,13 +1175,27 @@ async def collect_file_cves(workspace_id: int, files: list[dict[str, Any]]) -> d
         filenames = sorted(set(service.get("files") or []))
         services.append({**service, "files": filenames, "file_count": len(filenames)})
     services.sort(key=lambda item: (int(item.get("port") or 0), item.get("proto") or "", item.get("service") or ""))
+    results = []
+    for result in result_map.values():
+        filenames = sorted(set(result.get("files") or []))
+        results.append({**result, "files": filenames, "file_count": len(filenames)})
+    results.sort(key=lambda item: (-(item.get("severity") or 0), item.get("scanner") or "", item.get("name") or ""))
+    applications = []
+    for application in application_map.values():
+        filenames = sorted(set(application.get("files") or []))
+        applications.append({**application, "files": filenames, "file_count": len(filenames)})
+    applications.sort(key=lambda item: (item.get("product") or "", item.get("version") or "", item.get("cpe") or ""))
     return {
         "items": items,
         "files": file_results,
         "services": services,
+        "results": results,
+        "applications": applications,
         "classifications": classifications,
         "total": len(items),
         "service_total": len(services),
+        "result_total": len(results),
+        "application_total": len(applications),
         "classified_total": len(classifications),
     }
 
@@ -2349,6 +2605,10 @@ async def save_report(
         "needs_attention": parsed.get("needs_attention", []),
         "services": scan_summary.get("services", []),
         "service_total": scan_summary.get("service_total", 0),
+        "results": scan_summary.get("results", []),
+        "result_total": scan_summary.get("result_total", 0),
+        "applications": scan_summary.get("applications", []),
+        "application_total": scan_summary.get("application_total", 0),
         "parse_errors": parsed.get("parse_errors", []),
         "reviewed_total": parsed.get("reviewed_total", len(parsed.get("all_cves", []))),
         "filtered_out_count": len(parsed.get("filtered_out", [])),
@@ -2472,9 +2732,13 @@ async def get_report(
         raise api_error(404, "Not found", "Report not found")
     report = dict(row)
     report["cve_summary"] = json.loads(report["cve_summary"])
-    if "services" not in report["cve_summary"] and files:
+    if any(key not in report["cve_summary"] for key in ("services", "results", "applications")) and files:
         scan_summary = await collect_file_cves(report["workspace_id"], files)
         report["cve_summary"]["services"] = scan_summary.get("services", [])
         report["cve_summary"]["service_total"] = scan_summary.get("service_total", 0)
+        report["cve_summary"]["results"] = scan_summary.get("results", [])
+        report["cve_summary"]["result_total"] = scan_summary.get("result_total", 0)
+        report["cve_summary"]["applications"] = scan_summary.get("applications", [])
+        report["cve_summary"]["application_total"] = scan_summary.get("application_total", 0)
     return report
 

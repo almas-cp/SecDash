@@ -751,6 +751,8 @@ async function openReport(id) {
   const noActionRequiredCount = Math.max(0, reviewedTotal - attentionRequiredCount);
   const topSeverity = highestSeverity(reportCves);
   const services = summary.services || [];
+  const results = summary.results || [];
+  const applications = summary.applications || [];
   const uniquePorts = new Set(services.map((item) => `${item.port}/${item.proto || "tcp"}`)).size;
   showModal(`
     <div class="panel-header">
@@ -775,14 +777,22 @@ async function openReport(id) {
     <div class="report-severity-row">${severityBreakdown(report)}</div>
     <p class="report-policy-note">${escapeHtml(summary.report_policy || "attention only")}</p>
     <div class="report-tabs" role="tablist">
-      <button class="report-tab active" type="button" data-report-tab="cves">CVEs</button>
-      <button class="report-tab" type="button" data-report-tab="services">Ports / Services</button>
+      <button class="report-tab active" type="button" data-report-tab="cves">CVEs <span>${reportCves.length}</span></button>
+      <button class="report-tab" type="button" data-report-tab="services">Ports / Services <span>${services.length}</span></button>
+      <button class="report-tab" type="button" data-report-tab="results">Results <span>${results.length}</span></button>
+      <button class="report-tab" type="button" data-report-tab="applications">Applications <span>${applications.length}</span></button>
     </div>
     <div class="report-tab-panel active" data-report-panel="cves">
       ${cveTable("Attention Required", reportCves)}
     </div>
     <div class="report-tab-panel" data-report-panel="services">
       ${reportServicesSection(services, reportCves)}
+    </div>
+    <div class="report-tab-panel" data-report-panel="results">
+      ${reportResultsSection(results)}
+    </div>
+    <div class="report-tab-panel" data-report-panel="applications">
+      ${reportApplicationsSection(applications)}
     </div>
   `, "large");
 }
@@ -842,6 +852,104 @@ function reportServiceCveRow(cveId, cve) {
       <span class="cve-id">${escapeHtml(cveId)}</span>
       <span class="cve-live-pill ${pillClass}">${label}</span>
       <span class="service-cve-note">${escapeHtml(status)}</span>
+    </div>
+  `;
+}
+
+function formatResultNumber(value, suffix = "") {
+  if (value === null || value === undefined || value === "") return "N/A";
+  return `${Number(value).toFixed(1)}${suffix}`;
+}
+
+function resultSeverityClass(value) {
+  const score = Number(value || 0);
+  if (score >= 9) return "critical";
+  if (score >= 7) return "high";
+  if (score >= 4) return "medium";
+  return score > 0 ? "low" : "unknown";
+}
+
+function reportResultsSection(results) {
+  const sorted = [...(results || [])].sort((left, right) => Number(right.severity || 0) - Number(left.severity || 0));
+  return `
+    <div class="report-section">
+      <div class="report-section-heading">
+        <h3>Scanner Results</h3>
+        <span>${sorted.length} findings</span>
+      </div>
+      <div class="finding-list">
+        ${sorted.length ? sorted.map(reportResultRow).join("") : `<div class="empty-state">No structured scanner results were saved with this report.</div>`}
+      </div>
+    </div>
+  `;
+}
+
+function reportResultRow(item) {
+  const severity = formatResultNumber(item.severity);
+  const qod = formatResultNumber(item.qod, "%");
+  const scanner = String(item.scanner || "scanner").toUpperCase();
+  const location = item.location || [item.port, item.proto].filter(Boolean).join("/");
+  const cves = item.cves || [];
+  return `
+    <details class="finding-row">
+      <summary class="finding-summary">
+        <div class="finding-main">
+          <strong>${escapeHtml(item.name || "Unnamed finding")}</strong>
+          <span>${escapeHtml(scanner)}${item.family ? ` | ${escapeHtml(item.family)}` : ""}</span>
+        </div>
+        <div class="finding-score severity-bar-${resultSeverityClass(item.severity)}">
+          <span>Severity</span>
+          <strong>${escapeHtml(severity)}</strong>
+        </div>
+        <div class="finding-meta">
+          <span><b>QoD</b> ${escapeHtml(qod)}</span>
+          <span><b>Host</b> ${escapeHtml(item.host || "N/A")}</span>
+          <span><b>Location</b> ${escapeHtml(location || "N/A")}</span>
+        </div>
+      </summary>
+      <div class="finding-body">
+        ${item.description ? `<p>${escapeHtml(item.description)}</p>` : ""}
+        ${item.solution ? `<div><span class="field-label">Solution</span><p>${escapeHtml(item.solution)}</p></div>` : ""}
+        ${cves.length ? `<div><span class="field-label">Linked CVEs</span><div class="finding-cves">${cves.map((cve) => `<span>${escapeHtml(cve)}</span>`).join("")}</div></div>` : ""}
+        <span class="detected-cve-files">${escapeHtml((item.files || [item.source]).filter(Boolean).join(", "))}</span>
+      </div>
+    </details>
+  `;
+}
+
+function reportApplicationsSection(applications) {
+  const sorted = [...(applications || [])].sort((left, right) => String(left.cpe || "").localeCompare(String(right.cpe || "")));
+  return `
+    <div class="report-section">
+      <div class="report-section-heading">
+        <h3>Detected Applications</h3>
+        <span>${sorted.length} applications</span>
+      </div>
+      <div class="application-list">
+        ${sorted.length ? sorted.map(reportApplicationRow).join("") : `<div class="empty-state">No application CPE data was saved with this report.</div>`}
+      </div>
+    </div>
+  `;
+}
+
+function reportApplicationRow(item) {
+  const displayName = [item.product, item.version].filter(Boolean).join(" ") || "Detected application";
+  const locations = (item.locations || []).join(", ");
+  return `
+    <div class="application-row">
+      <div>
+        <strong>${escapeHtml(displayName)}</strong>
+        <span class="mono">${escapeHtml(item.cpe)}</span>
+      </div>
+      <div>
+        <span class="field-label">Locations</span>
+        <strong>${escapeHtml(locations || "N/A")}</strong>
+      </div>
+      <div>
+        <span class="field-label">Occurrences</span>
+        <strong>${escapeHtml(item.occurrences || 1)}</strong>
+      </div>
+      <span class="detected-cve-files">${escapeHtml((item.files || [item.source]).filter(Boolean).join(", "))}</span>
     </div>
   `;
 }
