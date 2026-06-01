@@ -402,6 +402,83 @@ h3 {
   color: #122343;
 }
 
+.workspace-status-bar {
+  display: grid;
+  grid-template-columns: auto minmax(120px, 1fr);
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #ffffff;
+  color: #40516e;
+  font-size: 12px;
+  font-weight: 800;
+  padding: 7px 10px;
+}
+
+.workspace-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: stretch;
+  gap: 12px;
+}
+
+.workspace-reports-panel {
+  grid-column: 1 / -1;
+}
+
+.workspace-cves-panel,
+.workspace-services-panel {
+  min-height: 420px;
+}
+
+.workspace-upload-panel {
+  display: grid;
+  min-width: 0;
+  gap: 12px;
+  padding: 12px;
+}
+
+.workspace-upload-grid {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.72fr) minmax(280px, 1.28fr);
+  align-items: start;
+  gap: 10px;
+}
+
+.workspace-detail-grid .panel {
+  gap: 10px;
+  min-width: 0;
+  padding: 12px;
+}
+
+.workspace-detail-grid .panel-header {
+  align-items: baseline;
+  gap: 8px;
+}
+
+.workspace-detail-grid .panel-header h3 {
+  font-size: 15px;
+}
+
+.workspace-detail-grid .panel-header .muted {
+  font-size: 11px;
+  text-align: right;
+}
+
+.bounded-list {
+  max-height: 560px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: #b7c9e2 transparent;
+  scrollbar-width: thin;
+}
+
+.workspace-upload-panel .bounded-list,
+.workspace-reports-panel .bounded-list {
+  max-height: 190px;
+}
+
 .drop-zone {
   min-height: 126px;
   display: grid;
@@ -412,6 +489,13 @@ h3 {
   color: var(--muted);
   text-align: center;
   padding: 24px;
+}
+
+.workspace-upload-panel .drop-zone {
+  min-height: 72px;
+  padding: 12px;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .drop-zone.dragging {
@@ -426,6 +510,11 @@ h3 {
 .service-list {
   display: grid;
   gap: 8px;
+}
+
+.detected-cve-list {
+  align-content: start;
+  grid-auto-rows: max-content;
 }
 
 .file-row,
@@ -444,15 +533,47 @@ h3 {
 }
 
 .detected-cve-row {
-  align-items: flex-start;
-  flex-direction: column;
+  display: block;
+  align-self: start;
+  height: auto;
+}
+
+.detected-cve-row[open] {
+  display: grid;
+  gap: 8px;
 }
 
 .detected-cve-main {
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(90px, 34%) auto;
+  align-items: center;
   gap: 12px;
+  cursor: pointer;
+  list-style: none;
   width: 100%;
+}
+
+.detected-cve-main::-webkit-details-marker {
+  display: none;
+}
+
+.detected-cve-main::after {
+  content: "Show";
+  flex: 0 0 auto;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.detected-cve-row[open] .detected-cve-main::after {
+  content: "Hide";
+}
+
+.workspace-detail-grid .detected-cve-main .detected-cve-files {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .detected-cve-files {
@@ -462,12 +583,34 @@ h3 {
 }
 
 .detected-cve-live {
+  display: none;
   width: 100%;
   border-top: 1px solid rgba(183, 204, 240, 0.72);
   color: #40516e;
   font-size: 13px;
   line-height: 1.5;
   padding-top: 8px;
+  overflow-wrap: anywhere;
+}
+
+.detected-cve-row[open] .detected-cve-live {
+  display: block;
+}
+
+.detected-cve-actions {
+  display: flex;
+  justify-content: flex-end;
+  width: 100%;
+}
+
+.detected-cve-actions:empty {
+  display: none;
+}
+
+.compact-action {
+  min-height: 32px;
+  padding: 0 10px;
+  font-size: 12px;
 }
 
 .cve-live-pill {
@@ -539,7 +682,8 @@ h3 {
 }
 
 .service-summary {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(82px, auto) minmax(0, 1fr) auto auto;
   align-items: flex-start;
   gap: 12px;
   cursor: pointer;
@@ -552,6 +696,7 @@ h3 {
 
 .service-summary::after {
   content: "Show";
+  align-self: center;
   color: var(--accent);
   font-size: 12px;
   font-weight: 800;
@@ -614,7 +759,6 @@ h3 {
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 6px;
-  margin-left: auto;
 }
 
 .service-cve-list {
@@ -1327,6 +1471,52 @@ details.report-section > summary {
   .finding-summary,
   .application-row {
     grid-template-columns: 1fr;
+  }
+
+  .workspace-detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .workspace-reports-panel {
+    grid-column: auto;
+  }
+
+  .workspace-cves-panel,
+  .workspace-services-panel {
+    min-height: auto;
+  }
+
+  .detected-cve-main,
+  .service-summary {
+    grid-template-columns: 1fr auto;
+  }
+
+  .detected-cve-main .detected-cve-files,
+  .service-details,
+  .service-risk-badges {
+    grid-column: 1 / -1;
+  }
+
+  .detected-cve-main::after,
+  .service-summary::after {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .service-cve-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .service-cve-note {
+    grid-column: 1 / -1;
+  }
+
+  .workspace-upload-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .bounded-list {
+    max-height: 420px;
   }
 
   .finding-meta {

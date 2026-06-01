@@ -1042,14 +1042,17 @@ def parse_nmap_file(filepath: str) -> list[str]:
 def cached_classification_map(workspace_id: int) -> dict[str, dict[str, Any]]:
     cached = PARSE_CACHE.get(workspace_id) or {}
     result: dict[str, dict[str, Any]] = {}
+    error_map = {item.get("cve_id"): item for item in cached.get("parse_errors") or []}
     for item in (cached.get("needs_attention") or []) + (cached.get("filtered_out") or []):
         cve_id = item.get("cve_id")
         attention = item.get("attention") or {}
         if not cve_id or not attention:
             continue
+        error = error_map.get(cve_id)
         result[cve_id] = {
             "cve_id": cve_id,
-            "status": "ok",
+            "status": "error" if error else "ok",
+            "message": error.get("message") if error else None,
             "severity": item.get("severity"),
             "attention_needed": attention.get("attention_needed"),
             "status_category": attention.get("status_category"),
@@ -1584,6 +1587,56 @@ def status_category_requires_attention(value: Any) -> bool | None:
     if category in {"affected", "deferred", "unknown", "needed", "needs_triage", "vulnerable"}:
         return True
     return None
+
+
+def cve_needs_attention(cve: dict[str, Any]) -> bool:
+    attention = cve.get("attention") or {}
+    return attention.get("attention_needed") is True and status_category_requires_attention(attention.get("status_category")) is not False
+
+
+def filtered_cve_record(cve: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "cve_id": cve.get("cve_id"),
+        "severity": cve.get("severity"),
+        "cvss_score": cve.get("cvss_score"),
+        "api_status": cve.get("api_status"),
+        "attention": cve.get("attention"),
+    }
+
+
+def build_parse_summary(
+    all_cves: list[dict[str, Any]],
+    parse_errors: list[dict[str, Any]],
+) -> dict[str, Any]:
+    needs_attention = [item for item in all_cves if cve_needs_attention(item)]
+    return {
+        "all_cves": needs_attention,
+        "needs_attention": needs_attention,
+        "filtered_out": [filtered_cve_record(item) for item in all_cves if item not in needs_attention],
+        "reviewed_total": len(all_cves),
+        "parse_errors": parse_errors,
+    }
+
+
+def replace_cached_cve(
+    workspace_id: int,
+    cve: dict[str, Any],
+    error: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    cached = PARSE_CACHE.get(workspace_id) or {}
+    cve_id = cve.get("cve_id")
+    records = [
+        item
+        for item in (cached.get("needs_attention") or []) + (cached.get("filtered_out") or [])
+        if item.get("cve_id") != cve_id
+    ]
+    errors = [item for item in cached.get("parse_errors") or [] if item.get("cve_id") != cve_id]
+    records.append(cve)
+    if error:
+        errors.append(error)
+    summary = build_parse_summary(records, errors)
+    PARSE_CACHE[workspace_id] = summary
+    return summary
 
 
 def rhel_major(os_version: str) -> str:
@@ -2530,30 +2583,9 @@ async def parse_workspace(
                     )
                     await asyncio.sleep(CVE_REQUEST_DELAY_SECONDS)
 
-        needs_attention = [
-            item
-            for item in all_cves
-            if (item.get("attention") or {}).get("attention_needed") is True
-            and status_category_requires_attention((item.get("attention") or {}).get("status_category")) is not False
-        ]
-        filtered_out = [
-            {
-                "cve_id": item.get("cve_id"),
-                "severity": item.get("severity"),
-                "cvss_score": item.get("cvss_score"),
-                "api_status": item.get("api_status"),
-                "attention": item.get("attention"),
-            }
-            for item in all_cves
-            if item not in needs_attention
-        ]
-        summary = {
-            "all_cves": needs_attention,
-            "needs_attention": needs_attention,
-            "filtered_out": filtered_out,
-            "reviewed_total": len(all_cves),
-            "parse_errors": parse_errors,
-        }
+        summary = build_parse_summary(all_cves, parse_errors)
+        needs_attention = summary["needs_attention"]
+        filtered_out = summary["filtered_out"]
         PARSE_CACHE[workspace_id] = summary
         counts = severity_counts(needs_attention)
         done_payload = {
@@ -2584,6 +2616,85 @@ async def parse_workspace(
         yield f"data: {json.dumps(done_payload)}\n\n"
 
     return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+@app.post("/api/workspaces/{workspace_id}/cves/{cve_id}/rescan")
+async def rescan_workspace_cve(
+    workspace_id: int,
+    cve_id: str,
+    user: dict[str, Any] = Depends(require_role("researcher")),
+) -> dict[str, Any]:
+    cve_id = cve_id.upper()
+    if not CVE_PATTERN.fullmatch(cve_id):
+        raise api_error(422, "Validation failed", "Invalid CVE ID")
+    cached = PARSE_CACHE.get(workspace_id)
+    if not cached:
+        raise api_error(422, "Validation failed", "Run classification before rescanning a CVE")
+    if cve_id not in {item.get("cve_id") for item in cached.get("parse_errors") or []}:
+        raise api_error(422, "Validation failed", "Only CVEs with classification errors can be rescanned individually")
+
+    async with db_connect() as db:
+        workspace = dict(await get_workspace_for_researcher(db, workspace_id, user["id"]))
+
+    logger.info(
+        "Single CVE rescan accepted | workspace_id=%s cve=%s user_id=%s username=%s os=%s os_version=%s",
+        workspace_id,
+        cve_id,
+        user["id"],
+        user["username"],
+        workspace["os"],
+        workspace["os_version"],
+    )
+    error = None
+    async with aiohttp.ClientSession() as session:
+        try:
+            cve_data = await query_cve(session, workspace["os"], cve_id)
+            classification = await classify_cve_attention(session, workspace, cve_data)
+            status = "ok"
+        except Exception as exc:
+            logger.warning(
+                "Single CVE rescan failed | workspace_id=%s cve=%s error=%s",
+                workspace_id,
+                cve_id,
+                exc,
+            )
+            error = {
+                "cve_id": cve_id,
+                "message": str(exc),
+                "source_status_code": exc.status_code if isinstance(exc, CveApiError) else None,
+                "source_url": exc.url if isinstance(exc, CveApiError) else None,
+                "api_status": "not_found" if isinstance(exc, CveApiError) and exc.status_code == 404 else "error",
+            }
+            cve_data = build_failed_cve_record(cve_id, workspace["os"], exc)
+            classification = await classify_cve_attention(session, workspace, cve_data)
+            status = "error"
+
+    summary = replace_cached_cve(workspace_id, cve_data, error)
+    logger.info(
+        "Single CVE rescan completed | workspace_id=%s cve=%s status=%s attention=%s status_category=%s remaining_errors=%s",
+        workspace_id,
+        cve_id,
+        status,
+        classification["attention_needed"],
+        classification["status_category"],
+        len(summary["parse_errors"]),
+    )
+    return {
+        "cve_id": cve_id,
+        "status": status,
+        "message": error["message"] if error else "CVE reclassified successfully",
+        "severity": cve_data["severity"],
+        "attention_needed": classification["attention_needed"],
+        "status_category": classification["status_category"],
+        "classifier": classification.get("provider"),
+        "confidence": classification.get("confidence"),
+        "reason": classification.get("reason"),
+        "status_summary": classification.get("status_summary"),
+        "target_status_summary": classification.get("target_status_summary"),
+        "remaining_errors": len(summary["parse_errors"]),
+        "needs_attention": len(summary["needs_attention"]),
+        "filtered_out": len(summary["filtered_out"]),
+    }
 
 
 @app.post("/api/workspaces/{workspace_id}/save")

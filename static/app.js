@@ -4,6 +4,7 @@ const state = {
   workspaces: [],
   currentWorkspace: null,
   reports: { items: [], total: 0, page: 1, per_page: 10 },
+  pipelineRunning: false,
 };
 
 const PAGE_TITLES = {
@@ -18,6 +19,8 @@ const OS_VERSIONS = {
   ubuntu: ["24.04 LTS", "23.10", "23.04", "22.04 LTS", "21.10", "21.04", "20.10", "20.04 LTS", "19.10", "18.04 LTS"],
   rhel: ["9.4", "9.3", "9.2", "9.1", "9.0", "8.10", "8.9", "8.8", "8.7", "8.6"],
 };
+const DEFAULT_WORKSPACE_OS = "rhel";
+const DEFAULT_WORKSPACE_VERSION = "8.10";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
@@ -304,6 +307,8 @@ async function openWorkspace(id) {
   $("#live-log").textContent = "";
   $("#parse-status").textContent = "Idle";
   $("#progress-bar").style.width = "0%";
+  $("#parse-button").disabled = !(workspace.files || []).length;
+  $("#parse-button").textContent = "Classify";
   $("#save-report-button").disabled = true;
   setView("workspace-detail");
   await loadDetectedCves(workspace.id);
@@ -368,16 +373,17 @@ function renderDetectedCves(items) {
     ? items
         .map(
           (item) => `
-        <div class="detected-cve-row" id="detected-${escapeHtml(item.cve_id)}">
-          <div class="detected-cve-main">
+        <details class="detected-cve-row" id="detected-${escapeHtml(item.cve_id)}">
+          <summary class="detected-cve-main">
             <div>
               <span class="cve-id">${escapeHtml(item.cve_id)}</span>
               <span class="cve-live-pill status-pending" data-cve-live-pill>Listed</span>
             </div>
             <span class="detected-cve-files">${escapeHtml((item.files || []).join(", "))}</span>
-          </div>
+          </summary>
           <div class="detected-cve-live" data-cve-live>Waiting for classification</div>
-        </div>
+          <div class="detected-cve-actions" data-cve-actions></div>
+        </details>
       `
         )
         .join("")
@@ -472,7 +478,9 @@ function updateDetectedCveRow(data) {
 
   const pill = row.querySelector("[data-cve-live-pill]");
   const live = row.querySelector("[data-cve-live]");
+  const actions = row.querySelector("[data-cve-actions]");
   row.classList.remove("is-running", "is-attention", "is-filtered", "is-error");
+  if (actions) actions.innerHTML = "";
 
   if (data.status === "running") {
     row.classList.add("is-running");
@@ -500,6 +508,9 @@ function updateDetectedCveRow(data) {
   if (live) {
     const reason = data.reason ? ` - ${data.reason}` : "";
     live.textContent = `Status: ${category} | ${verifier}${confidence} | ${decision}${reason}`;
+  }
+  if (actions && data.status === "error") {
+    actions.innerHTML = `<button class="secondary-button compact-action" type="button" data-rescan-cve="${escapeHtml(data.cve_id)}">Rescan CVE</button>`;
   }
 }
 
@@ -552,7 +563,7 @@ function showWorkspaceModal() {
       <label>OS
         <select id="workspace-os">
           <option value="ubuntu">Ubuntu</option>
-          <option value="rhel">RHEL</option>
+          <option value="rhel" selected>RHEL</option>
         </select>
       </label>
       <label>Version<select id="workspace-version"></select></label>
@@ -567,7 +578,10 @@ function showWorkspaceModal() {
   const versionSelect = $("#workspace-version");
   const osSelect = $("#workspace-os");
   const fillVersions = () => {
-    versionSelect.innerHTML = OS_VERSIONS[osSelect.value].map((version) => `<option>${version}</option>`).join("");
+    const defaultVersion = osSelect.value === DEFAULT_WORKSPACE_OS ? DEFAULT_WORKSPACE_VERSION : OS_VERSIONS[osSelect.value][0];
+    versionSelect.innerHTML = OS_VERSIONS[osSelect.value]
+      .map((version) => `<option${version === defaultVersion ? " selected" : ""}>${version}</option>`)
+      .join("");
   };
   fillVersions();
   osSelect.addEventListener("change", fillVersions);
@@ -598,14 +612,20 @@ async function deleteWorkspace(id) {
 }
 
 async function uploadSelectedFiles(files) {
-  if (!state.currentWorkspace || !files.length) return;
+  if (!state.currentWorkspace || !files.length || state.pipelineRunning) return;
   const form = new FormData();
   Array.from(files).forEach((file) => form.append("files", file));
+  $("#parse-status").textContent = "Uploading";
   const result = await api(`/api/workspaces/${state.currentWorkspace.id}/files`, { method: "POST", body: form });
   result.files.forEach((file) => {
     if (file.status === "error") toast(`${file.filename}: ${file.message}`);
   });
+  const uploadedCount = result.files.filter((file) => file.status === "ok").length;
   await openWorkspace(state.currentWorkspace.id);
+  if (uploadedCount) {
+    $("#parse-status").textContent = "Ready to classify";
+    toast(`${uploadedCount} scan file${uploadedCount === 1 ? "" : "s"} uploaded`);
+  }
 }
 
 async function deleteFile(id) {
@@ -620,8 +640,13 @@ function appendLog(line) {
   log.scrollTop = log.scrollHeight;
 }
 
-async function parseWorkspace() {
-  if (!state.currentWorkspace) return;
+async function parseWorkspace({ autoSave = true } = {}) {
+  if (!state.currentWorkspace || state.pipelineRunning) return;
+  if (!(state.currentWorkspace.files || []).length) {
+    toast("Upload at least one scan file before classifying");
+    return;
+  }
+  state.pipelineRunning = true;
   const classifyButton = $("#parse-button");
   classifyButton.disabled = true;
   classifyButton.textContent = "Classifying...";
@@ -630,6 +655,7 @@ async function parseWorkspace() {
   $("#parse-status").textContent = "Classifying";
   $("#progress-bar").style.width = "0%";
   resetDetectedCveRows();
+  appendLog("[start] Manual classification started");
   appendLog("[start] CVE API checks and Groq cross-verification started");
 
   try {
@@ -645,18 +671,26 @@ async function parseWorkspace() {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    let donePayload = null;
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       const events = buffer.split("\n\n");
       buffer = events.pop() || "";
-      events.forEach(handleSseEvent);
+      events.forEach((raw) => {
+        donePayload = handleSseEvent(raw) || donePayload;
+      });
+    }
+    if (donePayload && autoSave) {
+      appendLog("[report] Classification complete, saving report snapshot");
+      await saveReport({ automatic: true });
     }
   } catch (error) {
     toast(error.message);
     $("#parse-status").textContent = "Failed";
   } finally {
+    state.pipelineRunning = false;
     classifyButton.disabled = false;
     classifyButton.textContent = "Classify";
   }
@@ -690,16 +724,42 @@ function handleSseEvent(raw) {
   if (event === "done") {
     $("#progress-bar").style.width = "100%";
     $("#parse-status").textContent = "Complete";
-    $("#cve-list-status").textContent = `Classification complete - ${data.needs_attention} attention needed, ${data.filtered_out || 0} filtered`;
+    $("#cve-list-status").textContent = `Classification complete - ${data.needs_attention} attention needed, ${data.filtered_out || 0} fixed`;
     $("#save-report-button").disabled = false;
-    toast(`Classification complete - ${data.needs_attention} attention needed, ${data.filtered_out || 0} filtered`);
+    toast(`Classification complete - ${data.needs_attention} attention needed, ${data.filtered_out || 0} fixed`);
+    return data;
   }
+  return null;
 }
 
-async function saveReport() {
+async function saveReport({ automatic = false } = {}) {
   const result = await api(`/api/workspaces/${state.currentWorkspace.id}/save`, { method: "POST" });
-  toast(`Report v${result.version} saved`);
+  toast(`Report v${result.version} ${automatic ? "saved automatically" : "saved"}`);
   await openWorkspace(state.currentWorkspace.id);
+}
+
+async function rescanCve(cveId) {
+  if (!state.currentWorkspace || state.pipelineRunning) return;
+  state.pipelineRunning = true;
+  const button = document.querySelector(`[data-rescan-cve="${CSS.escape(cveId)}"]`);
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Rescanning...";
+  }
+  appendLog(`[rescan] ${cveId} - retrying CVE API and AI status gate`);
+  updateDetectedCveRow({ cve_id: cveId, status: "running" });
+  try {
+    const result = await api(`/api/workspaces/${state.currentWorkspace.id}/cves/${encodeURIComponent(cveId)}/rescan`, { method: "POST" });
+    updateDetectedCveRow(result);
+    appendLog(`[rescan] ${cveId} - ${result.status_category} - ${result.status === "error" ? "still failed" : "completed"}`);
+    await saveReport({ automatic: true });
+  } catch (error) {
+    toast(error.message);
+    appendLog(`[rescan] ${cveId} - failed - ${error.message}`);
+    updateDetectedCveRow({ cve_id: cveId, status: "error", message: error.message, status_category: "error" });
+  } finally {
+    state.pipelineRunning = false;
+  }
 }
 
 async function loadReports(page = 1) {
@@ -1186,6 +1246,7 @@ document.addEventListener("click", async (event) => {
   if (target.dataset.openWorkspace) openWorkspace(target.dataset.openWorkspace);
   if (target.dataset.deleteWorkspace) deleteWorkspace(target.dataset.deleteWorkspace);
   if (target.dataset.deleteFile) deleteFile(target.dataset.deleteFile);
+  if (target.dataset.rescanCve) rescanCve(target.dataset.rescanCve);
   if (target.dataset.openReport) openReport(target.dataset.openReport);
   if (target.dataset.deleteUser) deleteUser(target.dataset.deleteUser);
   if (target.dataset.resetUser) showResetModal(target.dataset.resetUser);
@@ -1219,9 +1280,12 @@ $("#back-to-workspaces").addEventListener("click", async () => {
   setView("workspaces");
   await loadWorkspaces();
 });
-$("#parse-button").addEventListener("click", parseWorkspace);
-$("#save-report-button").addEventListener("click", saveReport);
-$("#file-input").addEventListener("change", (event) => uploadSelectedFiles(event.target.files));
+$("#parse-button").addEventListener("click", () => parseWorkspace());
+$("#save-report-button").addEventListener("click", () => saveReport());
+$("#file-input").addEventListener("change", async (event) => {
+  await uploadSelectedFiles(event.target.files);
+  event.target.value = "";
+});
 $("#create-user-form").addEventListener("submit", createUser);
 $("#report-filters").addEventListener("submit", (event) => {
   event.preventDefault();

@@ -86,56 +86,57 @@
               </div>
               <div class="button-row">
                 <button id="parse-button" class="primary-button" type="button">Classify</button>
-                <button id="save-report-button" class="secondary-button" type="button" disabled>Save Report</button>
+                <button id="save-report-button" class="secondary-button" type="button" disabled>Save Snapshot</button>
               </div>
             </div>
 
-            <div id="workspace-meta" class="meta-grid"></div>
-
-            <div class="panel">
+            <div class="panel workspace-upload-panel">
               <div class="panel-header">
                 <h3>Scan Files</h3>
-                <span class="muted">.xml, .json, .nmap, .gnmap, .txt, .csv up to 10MB</span>
+                <span class="muted">Upload files as they become available. Classification starts when you click Classify.</span>
               </div>
-              <label id="drop-zone" class="drop-zone">
-                <input id="file-input" type="file" multiple accept=".xml,.json,.nmap,.gnmap,.txt,.csv" hidden />
-                <span>Drop nmap files here or click to browse</span>
-              </label>
-              <div id="file-list" class="file-list"></div>
+              <div class="workspace-upload-grid">
+                <label id="drop-zone" class="drop-zone">
+                  <input id="file-input" type="file" multiple accept=".xml,.json,.nmap,.gnmap,.txt,.csv" hidden />
+                  <span>Drop scan files or click to browse</span>
+                </label>
+                <div id="file-list" class="file-list bounded-list"></div>
+              </div>
             </div>
 
-            <div class="panel">
-              <div class="panel-header">
-                <h3>Detected CVEs</h3>
-                <span id="cve-list-status" class="muted">Upload files to extract CVEs</span>
-              </div>
-              <div id="detected-cve-list" class="detected-cve-list"></div>
-            </div>
-
-            <div class="panel">
-              <div class="panel-header">
-                <h3>Ports & Services</h3>
-                <span id="service-list-status" class="muted">Upload files to extract services</span>
-              </div>
-              <div id="service-list" class="service-list"></div>
-            </div>
-
-            <div class="panel">
-              <div class="panel-header">
-                <h3>Classification Progress</h3>
-                <span id="parse-status" class="muted">Idle</span>
-              </div>
+            <div class="workspace-status-bar">
+              <span id="parse-status">Idle</span>
               <div class="progress-shell">
                 <div id="progress-bar" class="progress-bar"></div>
               </div>
-              <div id="live-log" class="live-log"></div>
+              <div id="live-log" hidden></div>
             </div>
 
-            <div class="panel">
-              <div class="panel-header">
-                <h3>Saved Versions</h3>
+            <div id="workspace-meta" class="meta-grid workspace-meta-grid"></div>
+
+            <div class="workspace-detail-grid">
+              <div class="panel workspace-reports-panel">
+                <div class="panel-header">
+                  <h3>Saved Versions</h3>
+                </div>
+                <div id="workspace-report-list" class="compact-list bounded-list"></div>
               </div>
-              <div id="workspace-report-list" class="compact-list"></div>
+
+              <div class="panel workspace-cves-panel">
+                <div class="panel-header">
+                  <h3>Detected CVEs</h3>
+                  <span id="cve-list-status" class="muted">Upload files to extract CVEs</span>
+                </div>
+                <div id="detected-cve-list" class="detected-cve-list bounded-list"></div>
+              </div>
+
+              <div class="panel workspace-services-panel">
+                <div class="panel-header">
+                  <h3>Ports & Services</h3>
+                  <span id="service-list-status" class="muted">Upload files to extract services</span>
+                </div>
+                <div id="service-list" class="service-list bounded-list"></div>
+              </div>
             </div>
           </section>
 
